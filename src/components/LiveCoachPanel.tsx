@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, MutableRefObject } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Mic, MicOff, Radio, RefreshCw, Volume2, Sparkles, AlertCircle, MessageSquare, Flame } from "lucide-react";
 
@@ -9,7 +9,12 @@ interface LiveCoachPanelProps {
     poorDepth: number;
     asymmetry: number;
     forwardLean: number;
+    exerciseMismatch?: string;
   };
+  repCount?: number;
+  onStatusChange?: (status: "disconnected" | "connecting" | "connected" | "error") => void;
+  triggerConnectRef?: MutableRefObject<(() => void) | null>;
+  trackingLost?: boolean;
 }
 
 interface ChatMessage {
@@ -18,7 +23,14 @@ interface ChatMessage {
   text: string;
 }
 
-export default function LiveCoachPanel({ exercise, formErrors }: LiveCoachPanelProps) {
+export default function LiveCoachPanel({
+  exercise,
+  formErrors,
+  repCount,
+  onStatusChange,
+  triggerConnectRef,
+  trackingLost
+}: LiveCoachPanelProps) {
   const [connectionStatus, setConnectionStatus] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected");
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -38,62 +50,276 @@ export default function LiveCoachPanel({ exercise, formErrors }: LiveCoachPanelP
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const isMutedRef = useRef<boolean>(false);
   const lastTriggerTimeRef = useRef<number>(0);
+  const lastRepCountRef = useRef<number>(0);
+  
+  // Anti-Repetition state machines
+  const lastCueTypeRef = useRef<string>("");
+  const consecutiveCountRef = useRef<number>(0);
 
   // Sync isMuted state to ref to avoid stale closures in audio process callback
   useEffect(() => {
     isMutedRef.current = isMuted;
   }, [isMuted]);
 
+  // Synchronize status up to parent callback if registered
+  useEffect(() => {
+    if (onStatusChange) {
+      onStatusChange(connectionStatus);
+    }
+  }, [connectionStatus, onStatusChange]);
+
+  // Expose connect trigger function back up to parent ref
+  useEffect(() => {
+    if (triggerConnectRef) {
+      triggerConnectRef.current = connectSession;
+    }
+    return () => {
+      if (triggerConnectRef) {
+        triggerConnectRef.current = null;
+      }
+    };
+  }, [triggerConnectRef]);
+
+  // Keep rep count tracking aligned with active exercise
+  useEffect(() => {
+    lastRepCountRef.current = repCount ?? 0;
+  }, [exercise]);
+
   // Monitor real-time form errors and dictate to Gemini Live model
   useEffect(() => {
     if (connectionStatus !== "connected") return;
 
     let postureCue = "";
-    
-    // Check for negative error thresholds
-    if (exercise === "Squats") {
-      if (formErrors.poorDepth > 0.18) postureCue = "My squat depth is too shallow right now. Give a voice tip to drop hips lower.";
-      else if (formErrors.forwardLean > 0.18) postureCue = "My torso is leaning too far forward. Voice prompt me to lift my chest and keep core tight.";
+    let isCriticalCorrection = false;
+    let currentWarningType = "";
+
+    // 1. Check for physical tracking lost
+    if (trackingLost) {
+      currentWarningType = "trackingLost";
+      postureCue = `[TRACKING LOST] Visual skeleton joint tracing is completely lost. Ask the athlete to step straight back into the camera view and stand still until tracking is re-established.`;
+      isCriticalCorrection = true;
+    }
+    // 2. Check for critical exercise mismatch (Wrong Exercise selected vs executed)
+    else if (formErrors.exerciseMismatch) {
+      currentWarningType = "mismatch";
+      postureCue = `[MISMATCH] Crucial Error: The user is currently executing the WRONG exercise/movement! They are doing ${formErrors.exerciseMismatch} but ${exercise} is selected. Stop praising, tell them to STOP immediately, and instruct them to execute ${exercise} instead to avoid physical injury.`;
+      isCriticalCorrection = true;
+    }
+    // 3. Otherwise, check for completed repetition or pose-hold cycle to offer positive encouragement!
+    else if (repCount !== undefined && repCount > lastRepCountRef.current) {
+      lastRepCountRef.current = repCount;
+      currentWarningType = "repCountUp";
+      postureCue = `[SUCCESS] Praise key milestone: Repetition / hold count ${repCount} of their designated "${exercise}" was successfully locked-in! Enthusiastically congratulate them under 8 words.`;
+      isCriticalCorrection = true; // completed rep gets immediate voice feedback
+    }
+    // 4. Otherwise, check for standard negative deviation warnings to offer corrective guidance with numerical percentages
+    else if (exercise === "Squats") {
+      if (formErrors.poorDepth > 0.18) {
+        currentWarningType = "poorDepth";
+        const devPct = Math.round(formErrors.poorDepth * 100);
+        postureCue = `[DEVIATION] Squat depth is too shallow by ${devPct}%. Voice prompt them to drop their hips lower so thighs are parallel to the ground.`;
+      } else if (formErrors.forwardLean > 0.18) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Spine forward tilt is too steep at ${devPct}% deviation. Ask them to sit back, raise their chest, and keep spine neutral.`;
+      } else if (formErrors.asymmetry > 0.18) {
+        currentWarningType = "asymmetry";
+        const devPct = Math.round(formErrors.asymmetry * 100);
+        postureCue = `[DEVIATION] Lateral left-right knee symmetry is skewed by ${devPct}%. Tell them to push upward evenly from both heels.`;
+      }
     }
     else if (exercise === "Pushups") {
-      if (formErrors.elbowFlare > 0.18) postureCue = "My elbows are flaring out of line. Whisper to tuck elbows 45 degrees closer to ribs.";
-      else if (formErrors.forwardLean > 0.18) postureCue = "My hips are sagging down. Prompt me to align hips with shoulders.";
+      if (formErrors.elbowFlare > 0.18) {
+        currentWarningType = "elbowFlare";
+        const devPct = Math.round(formErrors.elbowFlare * 100);
+        postureCue = `[DEVIATION] Shoulder-elbow flaring angle is too high by ${devPct}%. Guide them to tuck elbows closer to their ribcage.`;
+      } else if (formErrors.forwardLean > 0.18) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Pelvic core is sagging by ${devPct}%. Ask them to engage their glutes and pull the lower navel in tight.`;
+      } else if (formErrors.asymmetry > 0.18) {
+        currentWarningType = "asymmetry";
+        const devPct = Math.round(formErrors.asymmetry * 100);
+        postureCue = `[DEVIATION] Left-right force distribution is lopsided by ${devPct}%. Direct them to press evenly through both palms.`;
+      }
     }
-    else if (exercise === "Bicep Curls" && formErrors.elbowFlare > 0.18) {
-      postureCue = "My elbows are pulling too far backwards/out of pocket. Prompt me to glue elbows to hip sides.";
+    else if (exercise === "Bicep Curls") {
+      if (formErrors.elbowFlare > 0.18) {
+        currentWarningType = "elbowFlare";
+        const devPct = Math.round(formErrors.elbowFlare * 100);
+        postureCue = `[DEVIATION] Elbow socket is flaring backward or outward by ${devPct}%. Tell them to glue elbows tighter to their ribs.`;
+      } else if (formErrors.forwardLean > 0.18) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Spinal sway or swinging momentum is active at ${devPct}%. Demand a stationary, rigid body core.`;
+      } else if (formErrors.asymmetry > 0.18) {
+        currentWarningType = "asymmetry";
+        const devPct = Math.round(formErrors.asymmetry * 100);
+        postureCue = `[DEVIATION] Bilateral arms are out of sync by ${devPct}%. Direct them to lift both collars with matching physical speed.`;
+      }
     }
-    else if (exercise === "Overhead Press" && formErrors.elbowFlare > 0.18) {
-      postureCue = "My elbows are flaring laterally. Ask me to stack elbows directly under palms.";
+    else if (exercise === "Overhead Press") {
+      if (formErrors.elbowFlare > 0.18) {
+        currentWarningType = "elbowFlare";
+        const devPct = Math.round(formErrors.elbowFlare * 100);
+        postureCue = `[DEVIATION] Elbows are flared wide by ${devPct}%. Instruct them to tuck elbows and keep them stacked under the wrists.`;
+      } else if (formErrors.forwardLean > 0.18) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Back hyperextension is present at ${devPct}%. Squeeze glutes and draw ribs downward.`;
+      } else if (formErrors.asymmetry > 0.15) {
+        currentWarningType = "asymmetry";
+        const devPct = Math.round(formErrors.asymmetry * 100);
+        postureCue = `[DEVIATION] Uneven push extension by ${devPct}%. Command left and right hands to reach full overhead lockout together.`;
+      }
+    }
+    else if (exercise === "Warrior II") {
+      if (formErrors.poorDepth > 0.18) {
+        currentWarningType = "poorDepth";
+        const devPct = Math.round(formErrors.poorDepth * 100);
+        postureCue = `[DEVIATION] Front knee lunge lunge is too shallow by ${devPct}%. Push hips lower and slide front knee to a 90-degree angle.`;
+      } else if (formErrors.elbowFlare > 0.18) {
+        currentWarningType = "elbowFlare";
+        const devPct = Math.round(formErrors.elbowFlare * 100);
+        postureCue = `[DEVIATION] Hand shoulder extensions are drooping by ${devPct}%. Elevate arms parallel to the floor.`;
+      } else if (formErrors.forwardLean > 0.18) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Trunk is leaning forward by ${devPct}%. Pull shoulders back over the pelvic floor.`;
+      }
+    }
+    else if (exercise === "Tree Pose") {
+      if (formErrors.poorDepth > 0.18) {
+        currentWarningType = "poorDepth";
+        const devPct = Math.round(formErrors.poorDepth * 100);
+        postureCue = `[DEVIATION] Bent knee has collapsed forward by ${devPct}%. Command them to rotate that knee outwards to the side.`;
+      } else if (formErrors.forwardLean > 0.18) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Core balance and spine lean is off by ${devPct}%. Anchor through standing foot and engage lower abs.`;
+      } else if (formErrors.asymmetry > 0.18) {
+        currentWarningType = "asymmetry";
+        const devPct = Math.round(formErrors.asymmetry * 100);
+        postureCue = `[DEVIATION] Shoulder tilt or hands are slanted by ${devPct}%. Level shoulders and press palms firmly at center chest.`;
+      }
+    }
+    else if (exercise === "Downward Dog") {
+      if (formErrors.poorDepth > 0.18) {
+        currentWarningType = "poorDepth";
+        const devPct = Math.round(formErrors.poorDepth * 100);
+        postureCue = `[DEVIATION] Knee alignment is bent by ${devPct}%. Flex quadriceps, extend leg joints, and sink heels.`;
+      } else if (formErrors.forwardLean > 0.15) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Arm shoulders are closed by ${devPct}%. Direct them to press chest closer to thighs to make an inverted V shape.`;
+      }
+    }
+    else if (exercise === "Cobra Pose") {
+      if (formErrors.poorDepth > 0.18) {
+        currentWarningType = "poorDepth";
+        const devPct = Math.round(formErrors.poorDepth * 100);
+        postureCue = `[DEVIATION] Pelvis has drifted up from mat by ${devPct}%. Ground the pubic bone flat into floor.`;
+      } else if (formErrors.forwardLean > 0.18) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Slouched thoracic alignment with shoulders shrugged by ${devPct}%. Direct them to slide shoulders back and lift face crown.`;
+      }
+    }
+    else if (exercise === "Finger Pinch Drill") {
+      if (formErrors.poorDepth > 0.18) {
+        currentWarningType = "poorDepth";
+        const devPct = Math.round(formErrors.poorDepth * 100);
+        postureCue = `[DEVIATION] Pinch contact gap is open by ${devPct}%. Press thumb and index tip firmly.`;
+      } else if (formErrors.asymmetry > 0.18) {
+        currentWarningType = "asymmetry";
+        const devPct = Math.round(formErrors.asymmetry * 100);
+        postureCue = `[DEVIATION] Left-right hands coordination is uneven by ${devPct}%. Match speed on pincers.`;
+      }
+    }
+    else if (exercise === "Facial Mobility") {
+      if (formErrors.asymmetry > 0.18) {
+        currentWarningType = "asymmetry";
+        const devPct = Math.round(formErrors.asymmetry * 100);
+        postureCue = `[DEVIATION] Left-right facial contraction is uneven by ${devPct}%. Guide them to contract both cheeks and temples symmetrically.`;
+      } else if (formErrors.forwardLean > 0.18) {
+        currentWarningType = "forwardLean";
+        const devPct = Math.round(formErrors.forwardLean * 100);
+        postureCue = `[DEVIATION] Neck/ear horizontal plane deviation at ${devPct}%. Keep ears level and gaze straight.`;
+      }
     }
     else if (formErrors.asymmetry > 0.18) {
-      postureCue = "My unilateral load balance is asymmetric. Tell me to pull up evenly on both sides.";
+      currentWarningType = "asymmetry";
+      const devPct = Math.round(formErrors.asymmetry * 100);
+      postureCue = `[DEVIATION] Bilateral balance is skewed by ${devPct}%. Instruct them to center weight symmetrically.`;
     }
 
-    // If no negative errors, check if the form is absolutely perfect to trigger positive encouragement!
-    if (!postureCue) {
+    // Process warning repeat rotation and prevent identical phrase generation loop
+    if (postureCue) {
+      if (lastCueTypeRef.current === currentWarningType) {
+        consecutiveCountRef.current += 1;
+      } else {
+        consecutiveCountRef.current = 1;
+        lastCueTypeRef.current = currentWarningType;
+      }
+
+      // If it's a structural deviation alert, rotate instructions to prevent speaking identical lines!
+      if (currentWarningType !== "mismatch" && currentWarningType !== "trackingLost" && currentWarningType !== "repCountUp" && currentWarningType !== "perfect") {
+        if (consecutiveCountRef.current === 1) {
+          postureCue += " Keep original corrective advice highly specific, critical, and direct.";
+        } else if (consecutiveCountRef.current === 2) {
+          postureCue += ` This is their second consecutive alert. Explain the physical impact of this misalignment and suggest a helpful sensory analogy or muscle activation cue.`;
+        } else {
+          postureCue += ` This is their third consecutive warning! Speak with strict coaching urgency, and demand they slow down and pause entirely until they correct this form issue.`;
+        }
+      }
+    } else {
+      // Check for perfect execution state ONLY if tracking is solid
       const isPerfect = (
-        (exercise !== "Squats" || (formErrors.poorDepth < 0.05 && formErrors.forwardLean < 0.05)) &&
-        (exercise !== "Pushups" || (formErrors.elbowFlare < 0.05 && formErrors.forwardLean < 0.05)) &&
-        (exercise !== "Bicep Curls" || formErrors.elbowFlare < 0.05) &&
-        (exercise !== "Overhead Press" || formErrors.elbowFlare < 0.05) &&
-        formErrors.asymmetry < 0.05
+        !trackingLost &&
+        formErrors.elbowFlare < 0.05 &&
+        formErrors.poorDepth < 0.05 &&
+        formErrors.asymmetry < 0.05 &&
+        formErrors.forwardLean < 0.05
       );
 
       if (isPerfect) {
-        postureCue = `My alignment, balance, and posture for ${exercise} are flawless. Proactively praise me with high enthusiasm! Tell me it is perfect and to lock in this kinetic cadence.`;
+        currentWarningType = "perfect";
+        if (lastCueTypeRef.current === "perfect") {
+          consecutiveCountRef.current += 1;
+        } else {
+          consecutiveCountRef.current = 1;
+          lastCueTypeRef.current = "perfect";
+        }
+
+        if (consecutiveCountRef.current === 1) {
+          postureCue = `The user is performing "${exercise}" with flawless mechanical precision and 100% balance alignment. Give an ultra-crisp, high-energy 6-word praise!`;
+        } else {
+          // Prevent spamming praise every active frame
+          postureCue = "";
+        }
+      } else {
+        consecutiveCountRef.current = 0;
+        lastCueTypeRef.current = "";
       }
     }
 
     const now = Date.now();
-    // Throttle triggers to every 8 seconds so Coach speaks at a comfortable rate without overlapping excessively
-    if (postureCue && now - lastTriggerTimeRef.current > 8000) {
+    let throttleWindow = 8000;
+    if (isCriticalCorrection) {
+      throttleWindow = 3000;
+    } else if (postureCue && currentWarningType === "perfect") {
+      throttleWindow = 14000; // Praise is rare and well-distended
+    }
+
+    // Send posture cue immediately or throttled comfortably depending on urgency
+    if (postureCue && (now - lastTriggerTimeRef.current > throttleWindow)) {
       lastTriggerTimeRef.current = now;
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         // Send cue to socket so Gemini Live API responds immediately over voice
         wsRef.current.send(JSON.stringify({ text: `[POSTURE ALERT: ${postureCue}]` }));
       }
     }
-  }, [formErrors, exercise, connectionStatus]);
+  }, [formErrors, exercise, connectionStatus, repCount, trackingLost]);
 
   // Handle active exercise change: close current connection if any so we can connect with new context
   useEffect(() => {
@@ -116,9 +342,10 @@ export default function LiveCoachPanel({ exercise, formErrors }: LiveCoachPanelP
   }, []);
 
   const addSystemLog = (text: string, sender: "user" | "coach" = "coach") => {
+    const rawId = "sys-" + Date.now().toString() + "-" + Math.random().toString(36).substring(2, 9);
     setTranscripts(prev => [
       ...prev,
-      { id: Date.now().toString() + Math.random().toString(), sender, text }
+      { id: rawId, sender, text }
     ].slice(-16));
   };
 
@@ -143,6 +370,9 @@ export default function LiveCoachPanel({ exercise, formErrors }: LiveCoachPanelP
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: 16000 // input rate
       });
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
       audioContextRef.current = audioCtx;
       nextStartTimeRef.current = 0;
 
@@ -220,6 +450,7 @@ export default function LiveCoachPanel({ exercise, formErrors }: LiveCoachPanelP
           // Case B: Model transcription
           if (payload.text) {
             setCoachSpeaking(true);
+            const tempId = "coach-" + Date.now().toString() + "-" + Math.random().toString(36).substring(2, 9);
             setTranscripts(prev => {
               // Append text to the last Coach bubble if it was very recent
               if (prev.length > 0 && prev[prev.length - 1].sender === "coach" && !prev[prev.length - 1].text.startsWith("💎") && !prev[prev.length - 1].text.startsWith("👑") && !prev[prev.length - 1].text.startsWith("🎯")) {
@@ -230,12 +461,13 @@ export default function LiveCoachPanel({ exercise, formErrors }: LiveCoachPanelP
                 };
                 return updated;
               }
-              return [...prev, { id: Math.random().toString(), sender: "coach", text: payload.text }];
+              return [...prev, { id: tempId, sender: "coach", text: payload.text }];
             });
           }
 
           // Case C: User transcription
           if (payload.userText) {
+            const tempId = "user-" + Date.now().toString() + "-" + Math.random().toString(36).substring(2, 9);
             setTranscripts(prev => {
               // Append to last user bubble
               if (prev.length > 0 && prev[prev.length - 1].sender === "user") {
@@ -246,7 +478,7 @@ export default function LiveCoachPanel({ exercise, formErrors }: LiveCoachPanelP
                 };
                 return updated;
               }
-              return [...prev, { id: Math.random().toString(), sender: "user", text: payload.userText }];
+              return [...prev, { id: tempId, sender: "user", text: payload.userText }];
             });
           }
 
@@ -547,9 +779,23 @@ export default function LiveCoachPanel({ exercise, formErrors }: LiveCoachPanelP
                     <span className={`text-[10px] font-medium leading-relaxed px-2.5 py-1.5 rounded-lg border ${
                       msg.sender === "user"
                         ? "bg-slate-900 border-slate-800 text-slate-300 rounded-tr-none"
-                        : msg.text.startsWith("👑") || msg.text.startsWith("🎯")
-                          ? "bg-sky-500/10 border-sky-500/15 text-sky-400 rounded-tl-none"
-                          : "bg-slate-850 border-slate-800 text-slate-300 rounded-tl-none"
+                        : (() => {
+                            const txt = msg.text.toLowerCase();
+                            const isIncorrect = txt.includes("incorrect") || txt.includes("error") || txt.includes("⚠️") || txt.includes("alert") || txt.includes("flare") || txt.includes("sagging") || txt.includes("shallow") || txt.includes("asymmetry");
+                            const isPerfect = txt.includes("perfect") || txt.includes("excellent") || txt.includes("🟢") || txt.includes("flawless") || txt.includes("beautiful") || msg.text.startsWith("👑") || msg.text.startsWith("🎯");
+                            const isDecent = txt.includes("decent") || txt.includes("satisfactory") || txt.includes("yellow") || txt.includes("steady") || txt.includes("good");
+                            
+                            if (isIncorrect) {
+                              return "bg-red-500/10 border-red-500/20 text-red-300 rounded-tl-none animate-[pulse_2.5s_infinite]";
+                            }
+                            if (isPerfect) {
+                              return "bg-emerald-500/10 border-emerald-500/20 text-emerald-300 rounded-tl-none";
+                            }
+                            if (isDecent) {
+                              return "bg-amber-500/10 border-amber-500/15 text-amber-300 rounded-tl-none";
+                            }
+                            return "bg-slate-850 border-slate-850 text-slate-300 rounded-tl-none";
+                          })()
                     }`}>
                       {msg.text}
                     </span>

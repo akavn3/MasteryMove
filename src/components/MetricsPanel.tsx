@@ -176,13 +176,15 @@ export default function MetricsPanel({
                 stroke="#0ea5e9"
                 strokeWidth="5"
                 strokeDasharray={28 * 2 * Math.PI}
-                strokeDashoffset={28 * 2 * Math.PI * (1 - precisionScore / 100)}
+                strokeDashoffset={28 * 2 * Math.PI * (1 - (precisionScore || 0) / 100)}
                 strokeLinecap="round"
                 fill="none"
                 className="transition-all duration-500"
               />
             </svg>
-            <span className="absolute text-sm font-black text-white font-mono">{precisionScore}%</span>
+            <span className="absolute text-sm font-black text-white font-mono">
+              {precisionScore > 0 ? `${precisionScore}%` : '--'}
+            </span>
           </div>
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Precision</span>
         </div>
@@ -199,13 +201,15 @@ export default function MetricsPanel({
                 stroke="#10b981"
                 strokeWidth="5"
                 strokeDasharray={28 * 2 * Math.PI}
-                strokeDashoffset={28 * 2 * Math.PI * (1 - symmetryScore / 100)}
+                strokeDashoffset={28 * 2 * Math.PI * (1 - (symmetryScore || 0) / 100)}
                 strokeLinecap="round"
                 fill="none"
                 className="transition-all duration-500"
               />
             </svg>
-            <span className="absolute text-sm font-black text-white font-mono">{symmetryScore}%</span>
+            <span className="absolute text-sm font-black text-white font-mono">
+              {symmetryScore > 0 ? `${symmetryScore}%` : '--'}
+            </span>
           </div>
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Symmetry</span>
         </div>
@@ -222,13 +226,15 @@ export default function MetricsPanel({
                 stroke="#f59e0b"
                 strokeWidth="5"
                 strokeDasharray={28 * 2 * Math.PI}
-                strokeDashoffset={28 * 2 * Math.PI * (1 - postureScore / 100)}
+                strokeDashoffset={28 * 2 * Math.PI * (1 - (postureScore || 0) / 100)}
                 strokeLinecap="round"
                 fill="none"
                 className="transition-all duration-500"
               />
             </svg>
-            <span className="absolute text-sm font-black text-white font-mono">{postureScore}%</span>
+            <span className="absolute text-sm font-black text-white font-mono">
+              {postureScore > 0 ? `${postureScore}%` : '--'}
+            </span>
           </div>
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Posture</span>
         </div>
@@ -311,6 +317,107 @@ export default function MetricsPanel({
         </div>
       </div>
 
+      {/* Real-time Body Parts Alignment Status */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4.5 shadow-md">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 mb-3.5 flex items-center gap-1.5 font-sans">
+          <Shield className="w-3.5 h-3.5 text-sky-400" />
+          Skeletal Alignment Status
+        </h3>
+
+        <div className="flex flex-col gap-3">
+          {(() => {
+            const parts = [
+              {
+                id: "shoulders_arms",
+                name: "Shoulders, Arms & Elbows",
+                metric: formErrors.elbowFlare,
+                correction: "Tuck elbows closer inward. Check joint positioning to isolate muscles.",
+                relevant: ["Pushups", "Bicep Curls", "Overhead Press", "Warrior II"].includes(exercise)
+              },
+              {
+                id: "spine_back",
+                name: "Spine, Back & Core Alignment",
+                metric: formErrors.forwardLean,
+                correction: "Decompress spinal column, lift the chest, and brace your structural abs.",
+                relevant: ["Squats", "Pushups", "Tree Pose", "Cobra Pose"].includes(exercise)
+              },
+              {
+                id: "legs_hips",
+                name: "Knees, Pelvis & Stance Depth",
+                metric: formErrors.poorDepth,
+                correction: "Lower hips further toward femur-parallel plane to achieve targets.",
+                relevant: ["Squats", "Warrior II", "Tree Pose", "Downward Dog", "Cobra Pose"].includes(exercise)
+              },
+              {
+                id: "bilateral_symmetry",
+                name: "Bilateral Symmetry & Balance",
+                metric: formErrors.asymmetry,
+                correction: "Evenly deploy push-force between lateral legs/feet to secure symmetry.",
+                relevant: true
+              }
+            ];
+
+            return parts.map((p) => {
+              let state: 'perfect' | 'decent' | 'incorrect' = 'perfect';
+              if (p.metric > 0.25) state = 'incorrect';
+              else if (p.metric > 0.08) state = 'decent';
+
+              let stateBg = "bg-emerald-500/10 border-emerald-500/20 text-emerald-400";
+              let stateText = "Green: Perfect Form";
+              let badgeColor = "bg-emerald-500";
+              
+              if (state === 'incorrect') {
+                stateBg = "bg-red-500/10 border-red-500/20 text-red-400 animate-[pulse_2s_infinite]";
+                stateText = "Red: Action Required";
+                badgeColor = "bg-red-500";
+              } else if (state === 'decent') {
+                stateBg = "bg-amber-500/10 border-amber-500/15 text-amber-400";
+                stateText = "Yellow: Decent Effort";
+                badgeColor = "bg-amber-500";
+              }
+
+              return (
+                <div 
+                  key={`${exercise}-${p.id}`} 
+                  className={`border rounded-xl p-3 transition-all ${stateBg} ${p.relevant ? 'opacity-100 scale-100' : 'opacity-40 grayscale-30 scale-98 hover:opacity-75'}`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-sans font-extrabold text-xs tracking-tight text-white">
+                      {p.name}
+                    </span>
+                    <span className="text-[9px] font-mono tracking-widest uppercase bg-slate-950/80 px-2 py-0.5 rounded-md flex items-center gap-1.5 font-bold">
+                      <span className={`w-1.5 h-1.5 rounded-full ${badgeColor}`} />
+                      {stateText}
+                    </span>
+                  </div>
+
+                  {state === 'incorrect' ? (
+                    <div className="mt-2 text-[11px] font-medium leading-relaxed bg-slate-950/80 p-2.5 rounded-lg border border-red-500/20 text-slate-300">
+                      <strong className="text-red-400 font-bold block uppercase text-[9px] tracking-wider mb-1">⚠️ Biomechanical Correction required:</strong>
+                      {p.correction}
+                    </div>
+                  ) : state === 'decent' ? (
+                    <div className="mt-1 text-[11px] font-medium leading-relaxed text-slate-300">
+                      <span className="text-amber-400 font-bold">Tip:</span> Form is steady but has slight sway. Tighten active stabilizes by 15% to lock in perfect standards.
+                    </div>
+                  ) : (
+                    <div className="text-[10px] opacity-75 font-mono">
+                      ✓ Symmetrical alignment verified. Biomechanics matching targeted optimal parameters.
+                    </div>
+                  )}
+                  
+                  {!p.relevant && (
+                    <div className="text-[8px] tracking-wide text-slate-400 mt-1 uppercase font-semibold">
+                      Offline for {exercise} (Monitoring pass-through is idle)
+                    </div>
+                  )}
+                </div>
+              );
+            });
+          })()}
+        </div>
+      </div>
+
       {/* 3. Calibration / Tolerances Settings */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4.5 shadow-md">
         <div className="flex justify-between items-center mb-3">
@@ -344,103 +451,6 @@ export default function MetricsPanel({
         </div>
       </div>
 
-      {/* 3. Interactive Biomechanical Defects Controller (Only in Sim Mode) */}
-      {isSimulated && (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4.5 shadow-md">
-          <div className="flex items-center gap-1.5 mb-3.5">
-            <HeartPulse className="w-4 h-4 text-emerald-400" />
-            <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-100">
-              Form Defects Simulator
-            </h3>
-            <span className="text-[9px] font-bold bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-1.5 py-0.5 rounded">
-              Active
-            </span>
-          </div>
-
-          <p className="text-slate-400 text-xs mb-4 leading-relaxed">
-            Adjust sliders to introduce biomechanical form discrepancies. Observe the color changes in the skeletal links and real-time warnings.
-          </p>
-
-          <div className="flex flex-col gap-3.5">
-            {/* Defect 1: Elbow Flare */}
-            <div>
-              <div className="flex justify-between items-center text-xs mb-1.5">
-                <span className="text-slate-300 font-medium font-sans">Elbow Lateral Flare</span>
-                <span className="text-sky-400 font-mono font-bold text-[11px]">
-                  {formErrors.elbowFlare > 0 ? `${Math.round(formErrors.elbowFlare * 100)}% deviation` : 'Pinned (0%)'}
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1.0"
-                step="0.05"
-                value={formErrors.elbowFlare}
-                onChange={(e) => handleSliderChange('elbowFlare', parseFloat(e.target.value))}
-                className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-sky-500 focus:outline-none"
-              />
-            </div>
-
-            {/* Defect 2: Depth Limit */}
-            <div>
-              <div className="flex justify-between items-center text-xs mb-1.5">
-                <span className="text-slate-300 font-medium font-sans">Depth Constraint (Flexion limit)</span>
-                <span className="text-sky-400 font-mono font-bold text-[11px]">
-                  {formErrors.poorDepth > 0 ? `${Math.round(formErrors.poorDepth * 100)}% short` : 'Bottom reached'}
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1.0"
-                step="0.05"
-                value={formErrors.poorDepth}
-                onChange={(e) => handleSliderChange('poorDepth', parseFloat(e.target.value))}
-                className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-sky-500 focus:outline-none"
-              />
-            </div>
-
-            {/* Defect 3: Asymmetrical Shift */}
-            <div>
-              <div className="flex justify-between items-center text-xs mb-1.5">
-                <span className="text-slate-300 font-medium font-sans">Asymmetrical Weight Shift</span>
-                <span className="text-sky-400 font-mono font-bold text-[11px]">
-                  {formErrors.asymmetry > 0 ? `${Math.round(formErrors.asymmetry * 100)}% L-R drift` : 'Symmetrical (0%)'}
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1.0"
-                step="0.05"
-                value={formErrors.asymmetry}
-                onChange={(e) => handleSliderChange('asymmetry', parseFloat(e.target.value))}
-                className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-sky-500 focus:outline-none"
-              />
-            </div>
-
-            {/* Defect 4: Trunk lean */}
-            <div>
-              <div className="flex justify-between items-center text-xs mb-1.5">
-                <span className="text-slate-300 font-medium font-sans">Trunk Lean / Core Sag</span>
-                <span className="text-sky-400 font-mono font-bold text-[11px]">
-                  {formErrors.forwardLean > 0 ? `${Math.round(formErrors.forwardLean * 100)}% collapse` : 'Straight Core'}
-                </span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1.0"
-                step="0.05"
-                value={formErrors.forwardLean}
-                onChange={(e) => handleSliderChange('forwardLean', parseFloat(e.target.value))}
-                className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-sky-500 focus:outline-none"
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 4. Scrolling Biomechanics Live Terminal */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col flex-1 shadow-md min-h-[160px] max-h-[220px]">
         <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 mb-2.5 flex items-center gap-1.5 font-sans">
@@ -458,15 +468,28 @@ export default function MetricsPanel({
             </div>
           ) : (
             liveComments.map((log, index) => {
-              const isWarning = log.includes('⚠️') || log.includes('FLARE') || log.includes('SHALLOW') || log.includes('SAGGING') || log.includes('ASYMMETRY');
+              const isIncorrect = log.includes('🔴') || log.includes('⚠️') || log.includes('INCORRECT') || log.includes('FLARE') || log.includes('SHALLOW') || log.includes('SAGGING') || log.includes('ASYMMETRY') || log.includes('SAG');
+              const isPerfect = log.includes('🟢') || log.includes('PERFECT') || log.includes('OPTIMAL') || log.includes('✓') || log.includes('integrity 100%') || log.includes('stability verified') || log.includes('inverted apex lock');
+              
+              let colorClass = "text-slate-300";
+              let icon = <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />;
+              
+              if (isIncorrect) {
+                colorClass = "text-red-400 font-bold bg-red-950/25 px-2 py-1 rounded-xl border border-red-900/40 w-full block";
+                icon = <AlertTriangle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-1" />;
+              } else if (isPerfect) {
+                colorClass = "text-emerald-400 font-medium bg-emerald-950/20 px-2 py-1 rounded-xl border border-emerald-950/40 w-full block";
+                icon = <ChevronRight className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-1" />;
+              } else {
+                // Decent or Rep lock Info (Yellow / Orange accent)
+                colorClass = "text-amber-400 font-medium bg-amber-950/15 px-2 py-1 rounded-xl border border-amber-900/30 w-full block";
+                icon = <ChevronRight className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-1" />;
+              }
+
               return (
-                <div key={index} className="flex gap-2 items-start transition-all animate-fadeIn">
-                  {isWarning ? (
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
-                  ) : (
-                    <ChevronRight className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                  )}
-                  <span className={isWarning ? 'text-amber-400 font-medium' : 'text-slate-300'}>
+                <div key={index} className="flex gap-2 items-start transition-all animate-fadeIn w-full">
+                  {icon}
+                  <span className={colorClass}>
                     {log}
                   </span>
                 </div>

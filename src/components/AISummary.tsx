@@ -81,7 +81,7 @@ function parseBoldText(text: string) {
     if (index % 2 === 1) {
       return <strong key={index} className="text-white font-bold">{part}</strong>;
     }
-    return part;
+    return <span key={index}>{part}</span>;
   });
 }
 

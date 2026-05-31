@@ -6,12 +6,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ExerciseType, Landmark, SessionStats } from './types';
-import { calculateAngle, calculateSpineStiffness } from './utils';
+import { calculateAngle, calculateSpineStiffness, detectMovementMismatch } from './utils';
 import CameraView from './components/CameraView';
 import MetricsPanel from './components/MetricsPanel';
 import AISummary from './components/AISummary';
 import LiveCoachPanel from './components/LiveCoachPanel';
-import { Sparkles, Trophy, BrainCircuit, Activity, RotateCcw, ArrowRight, Library, CheckCircle2, Dumbbell, Shield, HelpCircle, HeartHandshake, Flower2, Flame, Smile, Hand } from 'lucide-react';
+import { Sparkles, Trophy, BrainCircuit, Activity, RotateCcw, ArrowRight, Library, CheckCircle2, Dumbbell, Shield, HelpCircle, HeartHandshake, Flower2, Flame, Smile, Hand, RefreshCw } from 'lucide-react';
 
 export const WORKOUT_CATALOG: { name: ExerciseType; summary: string; muscles: string[]; keyJoints: string; postureTip: string }[] = [
   {
@@ -108,16 +108,24 @@ export default function App() {
   const [leftHandLandmarks, setLeftHandLandmarks] = useState<Landmark[]>([]);
   const [rightHandLandmarks, setRightHandLandmarks] = useState<Landmark[]>([]);
   const [isSimulated, setIsSimulated] = useState<boolean>(false); // default to live camera for real-time motion tracking
-  const [formErrors, setFormErrors] = useState({
+  const [formErrors, setFormErrors] = useState<{
+    elbowFlare: number;
+    poorDepth: number;
+    asymmetry: number;
+    forwardLean: number;
+    exerciseMismatch?: string;
+  }>({
     elbowFlare: 0,
     poorDepth: 0,
     asymmetry: 0,
-    forwardLean: 0
+    forwardLean: 0,
+    exerciseMismatch: ''
   });
 
   // Rep counter state-machine tracking
   const [repCount, setRepCount] = useState(0);
   const [trackingState, setTrackingState] = useState<number>(0); // 0 = start/extended, 1 = deep/flexed
+  const [activeHoldTime, setActiveHoldTime] = useState<number>(0);
   const [liveComments, setLiveComments] = useState<string[]>([]);
   
   // Historical session statistics
@@ -127,8 +135,33 @@ export default function App() {
   const [duration, setDuration] = useState(0);
   const [sessionStats, setSessionStats] = useState<SessionStats | null>(null);
 
+  // Synchronous references for quick-access voice connecting inside header
+  const [voiceStatus, setVoiceStatus] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected");
+  const triggerVoiceConnectRef = useRef<(() => void) | null>(null);
+
   const timerRef = useRef<number | null>(null);
   const lastSpokenTimeRef = useRef<number>(0);
+
+  // Synchronous tracking references to solve render-batching state lags, duplicated reps, or flood alerting
+  const trackingStateRef = useRef<number>(0); // 0 = start/extension, 1 = deep concentric zone
+  const peakMetricRef = useRef<number>(180);  // stores extreme angle achieved during a repetition peak (flexion or lock)
+  const lastAlertTimesRef = useRef<Record<string, number>>({}); // rate-limiting comments stream by key signature alert
+  const poseHoldStartTimeRef = useRef<number | null>(null); // accurate milliseconds timestamp when a yoga posture is perfectly completed
+  const lastRepCountRef = useRef<number>(0); // tracks running rep integers to support live string updates dynamically
+
+  // Clear any residual form errors when switching to simulation mode for a clean perfect-drill display
+  useEffect(() => {
+    if (isSimulated) {
+      setFormErrors({
+        elbowFlare: 0,
+        poorDepth: 0,
+        asymmetry: 0,
+        forwardLean: 0,
+        exerciseMismatch: ''
+      });
+      setLiveComments([]); // clear the warning terminal so the motion looks clean
+    }
+  }, [isSimulated]);
 
   // Dynamic feedback thresholds based on tolerance standard
   const getToleranceWindow = () => {
@@ -141,6 +174,14 @@ export default function App() {
   const startPractice = () => {
     setRepCount(0);
     setTrackingState(0);
+    
+    // Reset synchronous state refs
+    trackingStateRef.current = 0;
+    peakMetricRef.current = 180;
+    lastAlertTimesRef.current = {};
+    poseHoldStartTimeRef.current = null;
+    lastRepCountRef.current = 0;
+
     setAccuracySamples([]);
     setSymmetrySamples([]);
     setPostureSamples([]);
@@ -220,6 +261,39 @@ export default function App() {
 
     const now = Date.now();
 
+    // Exercise Mismatch & Biomechanical Safeguard Detection
+    if (!isSimulated) {
+      const mismatch = detectMovementMismatch(pts, selectedExercise);
+      if (mismatch.mismatchDetected) {
+        pushThrottledAlert(mismatch.warningText, 4500);
+        
+        // Lock errors to peak to drop precision score to represent failed compliance
+        setFormErrors({
+          elbowFlare: 1.0,
+          poorDepth: 1.0,
+          asymmetry: 1.0,
+          forwardLean: 1.0,
+          exerciseMismatch: mismatch.perceivedExercise
+        });
+        
+        setAccuracySamples((prev) => [...prev, 10].slice(-30));
+        setSymmetrySamples((prev) => [...prev, 10].slice(-30));
+        setPostureSamples((prev) => [...prev, 10].slice(-30));
+        return; // Exit early to block reps logging or positive verbal praise!
+      } else if (formErrors.exerciseMismatch) {
+        // Clear active mismatch if they returned to correct movement pattern
+        setFormErrors(prev => ({
+          ...prev,
+          exerciseMismatch: ''
+        }));
+      }
+    }
+
+    let calculatedElbowFlare = 0;
+    let calculatedPoorDepth = 0;
+    let calculatedAsymmetry = 0;
+    let calculatedForwardLean = 0;
+
     // SQUATS RULESETS
     if (selectedExercise === 'Squats') {
       const leftHip = pts[23], leftKnee = pts[25], leftAnkle = pts[27];
@@ -238,39 +312,65 @@ export default function App() {
 
       // 3. Squat Rep State-Machine
       const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
+
+      if (!isSimulated) {
+        calculatedPoorDepth = avgKneeAngle < 165 
+          ? Math.max(0, Math.min(1.0, (avgKneeAngle - 100) / 60))
+          : 0;
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (85 - currentPosture) / 40));
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedElbowFlare = 0;
+      } else {
+        calculatedPoorDepth = formErrors.poorDepth;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedElbowFlare = formErrors.elbowFlare;
+      }
       
-      if (trackingState === 0) {
-        // Looking for bottom flexion peak
-        if (avgKneeAngle < 120) {
+      // State tracking: 0 = standing, 1 = squatting peak descent
+      if (trackingStateRef.current === 0) {
+        if (avgKneeAngle < 125) {
+          trackingStateRef.current = 1;
           setTrackingState(1);
+          peakMetricRef.current = avgKneeAngle; // Init flexion peak
+        }
+      } else if (trackingStateRef.current === 1) {
+        // Track the lowest angle achieved (deepest part of the squat)
+        peakMetricRef.current = Math.min(peakMetricRef.current, avgKneeAngle);
+
+        // Standard extension stand-up completion threshold
+        if (avgKneeAngle > 150) {
+          trackingStateRef.current = 0;
+          setTrackingState(0);
           
-          // Form checks at bottom depth
-          const depthViolation = avgKneeAngle > 105; // Squat depth target is <=100
-          if (depthViolation) {
-            pushAlert('⚠️ SHALLOW SQUAT: Knee flexion peaked above 105°. Drop your hips lower to hit full depth!');
+          // Evaluate form based on peak depth achieved at bottom of rep
+          const finalPeak = peakMetricRef.current;
+          const targetDepth = 105;
+          const isShallow = finalPeak > targetDepth;
+
+          if (isShallow) {
+            pushAlert(`⚠️ SHALLOW SQUAT: Knee flexion peaked above 105° (reached ${Math.round(finalPeak)}°). Drop your hips lower next time.`);
           } else {
-            pushAlert('🟢 DEPTH OPTIMAL: Knee kinematics hit target parallel window.');
+            pushAlert(`🟢 DEPTH OPTIMAL: Knee kinematics hit target parallel window (reached ${Math.round(finalPeak)}°). Excellent depth.`);
           }
 
           if (currentPosture < 80) {
-            pushAlert('⚠️ POSTURAL OVERLEAN: Your back is folding forward. Keep your core braced and chest tall.');
+            pushThrottledAlert('⚠️ POSTURAL OVERLEAN: Your back is folding forward. Keep your core braced and chest tall.', 4000);
+          }
+          if (currentSymmetry < 85) {
+            pushThrottledAlert('⚠️ ASYMMETRICAL LOAD: Your weight is shifting horizontally. Push through both feet equally.', 4000);
           }
 
-          if (currentSymmetry < 85) {
-            pushAlert('⚠️ ASYMMETRICAL LOAD: Your weight is shifting horizontally. Push through both feet equally.');
-          }
-        }
-      } else if (trackingState === 1) {
-        // Looking for recovery to standing extension
-        if (avgKneeAngle > 155) {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert(`🔥 Rep ${repCount + 1} locked in. Excellent extension template.`);
+          // Safe rep increment
+          const nextReps = lastRepCountRef.current + 1;
+          lastRepCountRef.current = nextReps;
+          setRepCount(nextReps);
+          pushAlert(`🔥 Rep ${nextReps} locked in. Excellent extension template.`);
         }
       }
 
       // Compute instant precision penalty
-      const squatErrorPenalty = (formErrors.poorDepth * 28) + (formErrors.asymmetry * 24) + (formErrors.forwardLean * 20);
+      const squatErrorPenalty = (calculatedPoorDepth * 28) + (calculatedAsymmetry * 24) + (calculatedForwardLean * 20);
       currentPrecision = Math.max(10, Math.round(92 - squatErrorPenalty));
 
     // BICEP CURL RULESETS
@@ -291,25 +391,50 @@ export default function App() {
 
       const avgElbow = (leftElbowAngle + rightElbowAngle) / 2;
 
+      if (!isSimulated) {
+        const shoulderWidth = Math.max(0.01, Math.sqrt(Math.pow(pts[11].x - pts[12].x, 2) + Math.pow(pts[11].y - pts[12].y, 2)));
+        const leftFlareRatio = Math.abs(pts[13].x - pts[11].x) / shoulderWidth;
+        const rightFlareRatio = Math.abs(pts[14].x - pts[12].x) / shoulderWidth;
+        const maxFlareRatio = Math.max(leftFlareRatio, rightFlareRatio);
+        calculatedElbowFlare = Math.max(0, Math.min(1.0, (maxFlareRatio - 0.28) / 0.45));
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (85 - currentPosture) / 40));
+        calculatedPoorDepth = 0;
+      } else {
+        calculatedElbowFlare = formErrors.elbowFlare;
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedPoorDepth = formErrors.poorDepth;
+      }
+
       // State machine for curl reps: 0 = extended bottom (~160 deg), 1 = fully contracted top (~50 deg)
-      if (trackingState === 0) {
-        if (avgElbow < 65) {
+      if (trackingStateRef.current === 0) {
+        if (avgElbow < 75) {
+          trackingStateRef.current = 1;
           setTrackingState(1);
-          if (formErrors.elbowFlare > 0.3) {
+          peakMetricRef.current = avgElbow; // track deepest contraction (minimum elbow angle)
+        }
+      } else if (trackingStateRef.current === 1) {
+        peakMetricRef.current = Math.min(peakMetricRef.current, avgElbow);
+
+        if (avgElbow > 140) {
+          trackingStateRef.current = 0;
+          setTrackingState(0);
+          
+          if (calculatedElbowFlare > 0.3) {
             pushAlert('⚠️ ELBOW FLARE: Your elbows are drifting wide. Pin them tight to your ribs to isolate the bicep.');
           } else {
             pushAlert('🟢 PEAK CONTRACTION: Peak motor-unit recruitment achieved at top of curl.');
           }
-        }
-      } else if (trackingState === 1) {
-        if (avgElbow > 150) {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert(`🔥 Rep ${repCount + 1} finalized. Clean eccentric extension.`);
+
+          const nextReps = lastRepCountRef.current + 1;
+          lastRepCountRef.current = nextReps;
+          setRepCount(nextReps);
+          pushAlert(`🔥 Rep ${nextReps} finalized. Clean eccentric extension.`);
         }
       }
 
-      const curlErrorPenalty = (formErrors.elbowFlare * 35) + (formErrors.asymmetry * 30);
+      const curlErrorPenalty = (calculatedElbowFlare * 35) + (calculatedAsymmetry * 30);
       currentPrecision = Math.max(10, Math.round(96 - curlErrorPenalty));
 
     // OVERHEAD PRESS RULESETS
@@ -325,55 +450,105 @@ export default function App() {
 
       const avgElbow = (leftElbowAngle + rightElbowAngle) / 2;
 
+      if (!isSimulated) {
+        const shoulderWidth = Math.max(0.01, Math.sqrt(Math.pow(pts[11].x - pts[12].x, 2) + Math.pow(pts[11].y - pts[12].y, 2)));
+        const leftFlareRatio = Math.abs(pts[13].x - pts[11].x) / shoulderWidth;
+        const rightFlareRatio = Math.abs(pts[14].x - pts[12].x) / shoulderWidth;
+        const maxFlareRatio = Math.max(leftFlareRatio, rightFlareRatio);
+        calculatedElbowFlare = Math.max(0, Math.min(1.0, (maxFlareRatio - 0.28) / 0.45));
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (85 - currentPosture) / 40));
+        calculatedPoorDepth = 0;
+      } else {
+        calculatedElbowFlare = formErrors.elbowFlare;
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedPoorDepth = formErrors.poorDepth;
+      }
+
       // State machine: 0 = starting neck shelf, 1 = completed overhead extension
-      if (trackingState === 0) {
-        if (avgElbow > 155) {
+      if (trackingStateRef.current === 0) {
+        if (avgElbow > 145) {
+          trackingStateRef.current = 1;
           setTrackingState(1);
+          peakMetricRef.current = avgElbow; // track peak extension
+        }
+      } else if (trackingStateRef.current === 1) {
+        peakMetricRef.current = Math.max(peakMetricRef.current, avgElbow);
+
+        if (avgElbow < 110) {
+          trackingStateRef.current = 0;
+          setTrackingState(0);
+          
           if (currentSymmetry < 80) {
             pushAlert('⚠️ BI-LATERAL BALANCING WARNING: One side is locking slower. Balance your vertical thrust.');
           } else {
             pushAlert('🟢 PERFECT LOCKOUT: Full scapular elevation achieved.');
           }
-        }
-      } else if (trackingState === 1) {
-        if (avgElbow < 95) {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert(`🔥 Rep ${repCount + 1}. Shoulder press baseline locked.`);
+
+          const nextReps = lastRepCountRef.current + 1;
+          lastRepCountRef.current = nextReps;
+          setRepCount(nextReps);
+          pushAlert(`🔥 Rep ${nextReps}. Shoulder press baseline locked.`);
         }
       }
 
-      const pressPenalty = (formErrors.elbowFlare * 25) + (formErrors.asymmetry * 38);
+      const pressPenalty = (calculatedElbowFlare * 25) + (calculatedAsymmetry * 38);
       currentPrecision = Math.max(10, Math.round(94 - pressPenalty));
 
     // PUSHUP RULESETS
     } else if (selectedExercise === 'Pushups') {
-      const shoulderY = pts[11].y;
-      const elbowY = pts[13].y;
       const leftElbowAngle = calculateAngle(pts[11], pts[13], pts[15]);
-
+      const rightElbowAngle = calculateAngle(pts[12], pts[14], pts[16]);
       currentPosture = calculateSpineStiffness(pts[11], pts[23], pts[27]);
-      currentSymmetry = Math.max(10, Math.round(100 - formErrors.asymmetry * 34));
+
+      if (!isSimulated) {
+        const elbowDiff = Math.abs(leftElbowAngle - rightElbowAngle);
+        currentSymmetry = Math.max(10, Math.round(100 - elbowDiff * 1.8));
+        const shoulderWidth = Math.max(0.01, Math.sqrt(Math.pow(pts[11].x - pts[12].x, 2) + Math.pow(pts[11].y - pts[12].y, 2)));
+        const leftFlareRatio = Math.abs(pts[13].x - pts[11].x) / shoulderWidth;
+        const rightFlareRatio = Math.abs(pts[14].x - pts[12].x) / shoulderWidth;
+        const maxFlareRatio = Math.max(leftFlareRatio, rightFlareRatio);
+        calculatedElbowFlare = Math.max(0, Math.min(1.0, (maxFlareRatio - 0.28) / 0.45));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (85 - currentPosture) / 45));
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedPoorDepth = 0;
+      } else {
+        currentSymmetry = Math.max(10, Math.round(100 - formErrors.asymmetry * 34));
+        calculatedElbowFlare = formErrors.elbowFlare;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedPoorDepth = formErrors.poorDepth;
+      }
 
       // State machine: 0 = top of plank, 1 = deep bottom chest floor
-      if (trackingState === 0) {
-        if (leftElbowAngle < 105) {
+      if (trackingStateRef.current === 0) {
+        if (leftElbowAngle < 120) {
+          trackingStateRef.current = 1;
           setTrackingState(1);
-          if (formErrors.forwardLean > 0.4) {
+          peakMetricRef.current = leftElbowAngle; // track minimum depth angle
+        }
+      } else if (trackingStateRef.current === 1) {
+        peakMetricRef.current = Math.min(peakMetricRef.current, leftElbowAngle);
+
+        if (leftElbowAngle > 140) {
+          trackingStateRef.current = 0;
+          setTrackingState(0);
+          
+          if (calculatedForwardLean > 0.4) {
             pushAlert('⚠️ SAGGING HIPS: Your pelvis is dipping. Tighten your lower glutes to lock your torso in alignment.');
           } else {
             pushAlert('🟢 STRICT PUSHUP DEPTH: Full anterior load activated.');
           }
-        }
-      } else if (trackingState === 1) {
-        if (leftElbowAngle > 155) {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert(`🔥 Rep ${repCount + 1}. Structural integrity 100% controlled.`);
+
+          const nextReps = lastRepCountRef.current + 1;
+          lastRepCountRef.current = nextReps;
+          setRepCount(nextReps);
+          pushAlert(`🔥 Rep ${nextReps}. Structural integrity 100% controlled.`);
         }
       }
 
-      const pushupPenalty = (formErrors.forwardLean * 32) + (formErrors.elbowFlare * 28);
+      const pushupPenalty = (calculatedForwardLean * 32) + (calculatedElbowFlare * 28);
       currentPrecision = Math.max(10, Math.round(91 - pushupPenalty));
 
     // WARRIOR II RULESETS
@@ -391,30 +566,57 @@ export default function App() {
       currentSymmetry = Math.max(0, Math.round(100 - Math.abs(leftElbowAngle - rightElbowAngle) * 1.5));
       currentPosture = calculateSpineStiffness(shoulderLeft, leftHip, leftAnkle);
 
-      if (trackingState === 0) {
-        if (rightKneeAngle < 115 && averageElbowAngle > 165) {
-          setTrackingState(1);
-          pushAlert('🟢 WARRIOR II LOCK: Arms aligned perfectly horizontal & deep pelvic lunge active.');
+      if (!isSimulated) {
+        calculatedPoorDepth = Math.max(0, Math.min(1.0, (rightKneeAngle - 110) / 45));
+        const leftSag = Math.abs(pts[13].y - pts[11].y);
+        const rightSag = Math.abs(pts[14].y - pts[12].y);
+        const maxSag = Math.max(leftSag, rightSag);
+        calculatedElbowFlare = Math.max(0, Math.min(1.0, (maxSag - 0.05) / 0.15));
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (85 - currentPosture) / 40));
+      } else {
+        calculatedPoorDepth = formErrors.poorDepth;
+        calculatedElbowFlare = formErrors.elbowFlare;
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedForwardLean = formErrors.forwardLean;
+      }
+
+      // Requirements for successful Warrior II alignment hold: Knee bent sufficiently (<125) & arms extended (>160)
+      const hasCorrectPosture = rightKneeAngle < 125 && averageElbowAngle > 160;
+
+      if (hasCorrectPosture) {
+        if (poseHoldStartTimeRef.current === null) {
+          poseHoldStartTimeRef.current = Date.now();
+          setActiveHoldTime(0);
+          pushThrottledAlert('🟢 WARRIOR II LOCK: Perfect alignment established. Hold steady!', 6000);
         } else {
-          if (rightKneeAngle >= 115) {
-            pushAlert('⚠️ SHALLOW LUNGE: Bend your front leg deeper towards 90° to engage your quad and hip.');
-          }
-          if (averageElbowAngle <= 165) {
-            pushAlert('⚠️ BENT ARMS: Extend both arms energetically straight out to the horizon.');
+          const heldSec = (Date.now() - poseHoldStartTimeRef.current) / 1000;
+          setActiveHoldTime(heldSec);
+          if (heldSec >= 2.0) {
+            // Success! Award 1 hold count
+            const nextReps = lastRepCountRef.current + 1;
+            lastRepCountRef.current = nextReps;
+            setRepCount(nextReps);
+            poseHoldStartTimeRef.current = null; // Reset hold
+            setActiveHoldTime(0);
+            pushAlert(`🔥 Hold ${nextReps} registered! Excellent alignment stability.`);
           }
         }
-      } else if (trackingState === 1) {
-        if (rightKneeAngle > 125 || averageElbowAngle < 155) {
-          setTrackingState(0);
-          pushAlert('⚠️ POSE HOLD BROKEN: Re-align your arms and sink hips down.');
-        } else {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert('🔥 Hold registered! Excellent alignment stability.');
+      } else {
+        // Alignment is broken or not yet reached
+        poseHoldStartTimeRef.current = null;
+        setActiveHoldTime(0);
+        
+        // Throttled coaching suggestions (once every 4 seconds) to prevent alert flooding
+        if (rightKneeAngle >= 125) {
+          pushThrottledAlert('⚠️ SHALLOW LUNGE: Bend your front leg deeper towards 90° to engage your quad and hip.', 4000);
+        }
+        if (averageElbowAngle <= 160) {
+          pushThrottledAlert('⚠️ BENT ARMS: Extend both arms energetically straight out to the horizon.', 4000);
         }
       }
 
-      const warriorPenalty = (formErrors.poorDepth * 25) + (formErrors.elbowFlare * 30);
+      const warriorPenalty = (calculatedPoorDepth * 25) + (calculatedElbowFlare * 30);
       currentPrecision = Math.max(10, Math.round(95 - warriorPenalty));
 
     // TREE POSE RULESETS
@@ -426,115 +628,207 @@ export default function App() {
       const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
       const leftElbowAngle = calculateAngle(shoulderLeft, elbowLeft, wristLeft);
 
-      currentSymmetry = Math.max(10, Math.round(100 - (formErrors.asymmetry * 25)));
-      currentPosture = calculateSpineStiffness(shoulderLeft, pts[23], pts[27]);
+      if (!isSimulated) {
+        currentSymmetry = Math.max(10, Math.round(100 - Math.abs(leftElbowAngle - calculateAngle(shoulderRight, elbowRight, wristRight)) * 1.5));
+        currentPosture = calculateSpineStiffness(shoulderLeft, pts[23], pts[27]);
+        calculatedPoorDepth = Math.max(0, Math.min(1.0, (leftKneeAngle - 105) / 50));
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (85 - currentPosture) / 40));
+        calculatedElbowFlare = 0;
+      } else {
+        currentSymmetry = Math.max(10, Math.round(100 - (formErrors.asymmetry * 25)));
+        currentPosture = calculateSpineStiffness(shoulderLeft, pts[23], pts[27]);
+        calculatedPoorDepth = formErrors.poorDepth;
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedElbowFlare = formErrors.elbowFlare;
+      }
 
-      if (trackingState === 0) {
-        if (leftKneeAngle < 105) {
-          setTrackingState(1);
-          if (currentPosture < 82) {
-            pushAlert('⚠️ TRUNK SAG / LEAN: Stand tall through your crown. Rest your foot high and open your knee.');
-          } else {
-            pushAlert('🟢 TREE POSE BALANCE ACQUIRED: Postural core and pelvis locked horizontally.');
+      // Requirements for balanced hold: Knee flared (<105) & standing tall (posture >= 80)
+      const hasCorrectPosture = leftKneeAngle < 105 && currentPosture >= 80;
+
+      if (hasCorrectPosture) {
+        if (poseHoldStartTimeRef.current === null) {
+          poseHoldStartTimeRef.current = Date.now();
+          setActiveHoldTime(0);
+          pushThrottledAlert('🟢 TREE POSE BALANCE ACQUIRED: Postural core and pelvis locked horizontally.', 6000);
+        } else {
+          const heldSec = (Date.now() - poseHoldStartTimeRef.current) / 1000;
+          setActiveHoldTime(heldSec);
+          if (heldSec >= 2.0) {
+            const nextReps = lastRepCountRef.current + 1;
+            lastRepCountRef.current = nextReps;
+            setRepCount(nextReps);
+            poseHoldStartTimeRef.current = null;
+            setActiveHoldTime(0);
+            pushAlert(`🔥 Zen hold ${nextReps} locked. Stability and posture verified.`);
           }
-        } else {
-          pushAlert('⚠️ OPEN BENT KNEE: Open your bent left knee outwards and secure your foot stance on your inner thigh.');
         }
-      } else if (trackingState === 1) {
-        if (leftKneeAngle > 120) {
-          setTrackingState(0);
-        } else {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert('🔥 Zen hold locked. Stability and posture verified.');
+      } else {
+        poseHoldStartTimeRef.current = null;
+        setActiveHoldTime(0);
+        if (leftKneeAngle >= 105) {
+          pushThrottledAlert('⚠️ OPEN BENT KNEE: Open your bent left knee outwards and secure your foot stance on your inner thigh.', 4000);
+        }
+        if (currentPosture < 80) {
+          pushThrottledAlert('⚠️ TRUNK SAG / LEAN: Stand tall through your crown. Brace your hips.', 4000);
         }
       }
 
-      const treePenalty = (formErrors.asymmetry * 35) + (formErrors.poorDepth * 20);
+      const treePenalty = (calculatedAsymmetry * 35) + (calculatedPoorDepth * 20);
       currentPrecision = Math.max(10, Math.round(94 - treePenalty));
 
     // DOWNWARD DOG RULESETS
     } else if (selectedExercise === 'Downward Dog') {
       const hipLeft = pts[23], shoulderLeft = pts[11], wristLeft = pts[15];
       const kneeLeft = pts[25], ankleLeft = pts[27];
+      const kneeRight = pts[26], ankleRight = pts[28];
 
       const shoulderLeftAngle = calculateAngle(hipLeft, shoulderLeft, wristLeft);
       const kneeLeftAngle = calculateAngle(hipLeft, kneeLeft, ankleLeft);
+      const kneeRightAngle = calculateAngle(pts[24], kneeRight, ankleRight);
 
       currentPosture = calculateSpineStiffness(shoulderLeft, hipLeft, ankleLeft);
-      currentSymmetry = Math.max(10, Math.round(100 - (formErrors.asymmetry * 28)));
 
-      if (trackingState === 0) {
-        if (shoulderLeftAngle > 155 && kneeLeftAngle > 150) {
-          setTrackingState(1);
-          pushAlert('🟢 DOWNWARD DOG COMPLETED: Hips pushed high, heels driven down, and thoracic arch flat.');
+      if (!isSimulated) {
+        const kneeDiff = Math.abs(kneeLeftAngle - kneeRightAngle);
+        currentSymmetry = Math.max(10, Math.round(100 - kneeDiff * 2.0));
+        calculatedPoorDepth = Math.max(0, Math.min(1.0, (160 - kneeLeftAngle) / 40));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (155 - shoulderLeftAngle) / 40));
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedElbowFlare = 0;
+      } else {
+        currentSymmetry = Math.max(10, Math.round(100 - (formErrors.asymmetry * 28)));
+        calculatedPoorDepth = formErrors.poorDepth;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedElbowFlare = formErrors.elbowFlare;
+      }
+
+      // Requirements: open shoulders (>155) & knees extended (>150)
+      const hasCorrectPosture = shoulderLeftAngle > 155 && kneeLeftAngle > 150;
+
+      if (hasCorrectPosture) {
+        if (poseHoldStartTimeRef.current === null) {
+          poseHoldStartTimeRef.current = Date.now();
+          setActiveHoldTime(0);
+          pushThrottledAlert('🟢 DOWNWARD DOG COMPLETED: Hips pushed high, heels driven down, and thoracic arch flat.', 6000);
         } else {
-          if (kneeLeftAngle <= 150) {
-            pushAlert('⚠️ BENT KNEES: If tight, keep knees slightly bent but prioritize pushing hips up.');
-          }
-          if (shoulderLeftAngle <= 155) {
-            pushAlert('⚠️ CLOSED SHOULDERS: Press your chest back towards your thighs to open your armpits.');
+          const heldSec = (Date.now() - poseHoldStartTimeRef.current) / 1000;
+          setActiveHoldTime(heldSec);
+          if (heldSec >= 2.0) {
+            const nextReps = lastRepCountRef.current + 1;
+            lastRepCountRef.current = nextReps;
+            setRepCount(nextReps);
+            poseHoldStartTimeRef.current = null;
+            setActiveHoldTime(0);
+            pushAlert(`🔥 Perfect inverted apex lock ${nextReps} registered!`);
           }
         }
-      } else if (trackingState === 1) {
-        if (shoulderLeftAngle < 145 || kneeLeftAngle < 140) {
-          setTrackingState(0);
-        } else {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert('🔥 Perfect inverted apex lock registered!');
+      } else {
+        poseHoldStartTimeRef.current = null;
+        setActiveHoldTime(0);
+        if (kneeLeftAngle <= 150) {
+          pushThrottledAlert('⚠️ BENT KNEES: If tight, keep knees slightly bent but prioritize pushing hips up.', 4000);
+        }
+        if (shoulderLeftAngle <= 155) {
+          pushThrottledAlert('⚠️ CLOSED SHOULDERS: Press your chest back towards your thighs to open your armpits.', 4000);
         }
       }
 
-      const dogPenalty = (formErrors.poorDepth * 30) + (formErrors.forwardLean * 24);
+      const dogPenalty = (calculatedPoorDepth * 30) + (calculatedForwardLean * 24);
       currentPrecision = Math.max(10, Math.round(92 - dogPenalty));
 
     // COBRA POSE RULESETS
     } else if (selectedExercise === 'Cobra Pose') {
       const shoulderLeft = pts[11], hipLeft = pts[23], ankleLeft = pts[27];
       const elbowLeft = pts[13], wristLeft = pts[15];
+      const elbowRight = pts[14], wristRight = pts[16];
 
       const elbowLeftAngle = calculateAngle(shoulderLeft, elbowLeft, wristLeft);
+      const elbowRightAngle = calculateAngle(pts[12], elbowRight, wristRight);
       
       const hipsStayingLow = hipLeft.y > 0.73;
-      currentSymmetry = Math.max(0, Math.round(100 - formErrors.asymmetry * 30));
       currentPosture = Math.round(100 - Math.abs(shoulderLeft.y - hipLeft.y) * 100);
 
-      if (trackingState === 0) {
-        if (shoulderLeft.y < 0.65 && hipsStayingLow) {
-          setTrackingState(1);
-          pushAlert('🟢 COBRA POSTURE ACTIVE: Scapulas drawn back, chest wall opened vertically, hips grounded.');
+      if (!isSimulated) {
+        const armDiff = Math.abs(elbowLeftAngle - elbowRightAngle);
+        currentSymmetry = Math.max(10, Math.round(100 - armDiff * 1.8));
+        calculatedPoorDepth = Math.max(0, Math.min(1.0, (0.73 - hipLeft.y) / 0.15));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (shoulderLeft.y - 0.55) / 0.15));
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedElbowFlare = 0;
+      } else {
+        currentSymmetry = Math.max(0, Math.round(100 - formErrors.asymmetry * 30));
+        calculatedPoorDepth = formErrors.poorDepth;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedElbowFlare = formErrors.elbowFlare;
+      }
+
+      // Requirements: Lifted shoulders (<0.65) and grounded hips
+      const hasCorrectPosture = shoulderLeft.y < 0.65 && hipsStayingLow;
+
+      if (hasCorrectPosture) {
+        if (poseHoldStartTimeRef.current === null) {
+          poseHoldStartTimeRef.current = Date.now();
+          setActiveHoldTime(0);
+          pushThrottledAlert('🟢 COBRA POSTURE ACTIVE: Scapulas drawn back, chest wall opened vertically, hips grounded.', 6000);
         } else {
-          if (!hipsStayingLow) {
-            pushAlert('⚠️ HIPS OFF GROUND: Anchor your pelvic bones to the mat. Lift using spine extensors.');
-          }
-          if (shoulderLeft.y >= 0.65) {
-            pushAlert('⚠️ COLLAPSED SPINAL ARCH: Squeeze shoulder blades together and lift your heart.');
+          const heldSec = (Date.now() - poseHoldStartTimeRef.current) / 1000;
+          setActiveHoldTime(heldSec);
+          if (heldSec >= 2.0) {
+            const nextReps = lastRepCountRef.current + 1;
+            lastRepCountRef.current = nextReps;
+            setRepCount(nextReps);
+            poseHoldStartTimeRef.current = null;
+            setActiveHoldTime(0);
+            pushAlert(`🔥 Heart-opening pose hold ${nextReps} completed!`);
           }
         }
-      } else if (trackingState === 1) {
-        if (shoulderLeft.y > 0.70 || !hipsStayingLow) {
-          setTrackingState(0);
-        } else {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert('🔥 Heart-opening pose hold completed!');
+      } else {
+        poseHoldStartTimeRef.current = null;
+        setActiveHoldTime(0);
+        if (!hipsStayingLow) {
+          pushThrottledAlert('⚠️ HIPS OFF GROUND: Anchor your pelvic bones to the mat. Lift using spine extensors.', 4000);
+        }
+        if (shoulderLeft.y >= 0.65) {
+          pushThrottledAlert('⚠️ COLLAPSED SPINAL ARCH: Squeeze shoulder blades together and lift your heart.', 4000);
         }
       }
 
-      const cobraPenalty = (formErrors.forwardLean * 38) + (formErrors.elbowFlare * 22);
+      const cobraPenalty = (calculatedForwardLean * 38) + (calculatedElbowFlare * 22);
       currentPrecision = Math.max(10, Math.round(93 - cobraPenalty));
-    } else if (selectedExercise === 'Finger Pinch Drill') {
-      const leftThumb = pts[21], leftIndex = pts[19];
-      const rightThumb = pts[22], rightIndex = pts[20];
 
+    } else if (selectedExercise === 'Finger Pinch Drill') {
       let leftDist = 1.0;
-      if (leftThumb && leftIndex && (!leftThumb.visibility || leftThumb.visibility > 0.01) && (!leftIndex.visibility || leftIndex.visibility > 0.01)) {
-        leftDist = Math.sqrt(Math.pow(leftThumb.x - leftIndex.x, 2) + Math.pow(leftThumb.y - leftIndex.y, 2));
-      }
       let rightDist = 1.0;
-      if (rightThumb && rightIndex && (!rightThumb.visibility || rightThumb.visibility > 0.01) && (!rightIndex.visibility || rightIndex.visibility > 0.01)) {
-        rightDist = Math.sqrt(Math.pow(rightThumb.x - rightIndex.x, 2) + Math.pow(rightThumb.y - rightIndex.y, 2));
+
+      // Use true high-precision hand landmarks if they are detected in the frame!
+      if (leftHandLandmarks && leftHandLandmarks.length >= 21) {
+        const thumbTip = leftHandLandmarks[4];
+        const indexTip = leftHandLandmarks[8];
+        if (thumbTip && indexTip) {
+          leftDist = Math.sqrt(Math.pow(thumbTip.x - indexTip.x, 2) + Math.pow(thumbTip.y - indexTip.y, 2));
+        }
+      } else {
+        const leftThumb = pts[21], leftIndex = pts[19];
+        if (leftThumb && leftIndex && (!leftThumb.visibility || leftThumb.visibility > 0.01) && (!leftIndex.visibility || leftIndex.visibility > 0.01)) {
+          leftDist = Math.sqrt(Math.pow(leftThumb.x - leftIndex.x, 2) + Math.pow(leftThumb.y - leftIndex.y, 2));
+        }
+      }
+
+      if (rightHandLandmarks && rightHandLandmarks.length >= 21) {
+        const thumbTip = rightHandLandmarks[4];
+        const indexTip = rightHandLandmarks[8];
+        if (thumbTip && indexTip) {
+          rightDist = Math.sqrt(Math.pow(thumbTip.x - indexTip.x, 2) + Math.pow(thumbTip.y - indexTip.y, 2));
+        }
+      } else {
+        const rightThumb = pts[22], rightIndex = pts[20];
+        if (rightThumb && rightIndex && (!rightThumb.visibility || rightThumb.visibility > 0.01) && (!rightIndex.visibility || rightIndex.visibility > 0.01)) {
+          rightDist = Math.sqrt(Math.pow(rightThumb.x - rightIndex.x, 2) + Math.pow(rightThumb.y - rightIndex.y, 2));
+        }
       }
 
       const avgDist = (leftDist + rightDist) / 2;
@@ -546,25 +840,46 @@ export default function App() {
       // Posture: neck/torso stiffness to keep focus while doing hand gestures
       currentPosture = calculateSpineStiffness(pts[11], pts[23], pts[27]);
 
+      if (!isSimulated) {
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedPoorDepth = Math.max(0, Math.min(1.0, (avgDist - 0.035) / 0.08));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (85 - currentPosture) / 40));
+        calculatedElbowFlare = 0;
+      } else {
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedPoorDepth = formErrors.poorDepth;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedElbowFlare = formErrors.elbowFlare;
+      }
+
       // State machine: 0 = fingers wide, 1 = pinched
-      if (trackingState === 0) {
-        if (avgDist < 0.035) {
+      if (trackingStateRef.current === 0) {
+        if (avgDist < 0.045) {
+          trackingStateRef.current = 1;
           setTrackingState(1);
-          if (leftDist > 0.045 && formErrors.asymmetry > 0.3) {
+          peakMetricRef.current = avgDist; // track minimum distance
+        }
+      } else if (trackingStateRef.current === 1) {
+        peakMetricRef.current = Math.min(peakMetricRef.current, avgDist);
+
+        if (avgDist > 0.065) {
+          trackingStateRef.current = 0;
+          setTrackingState(0);
+          
+          if (leftDist > 0.045 && calculatedAsymmetry > 0.3) {
             pushAlert('⚠️ PINCH ASYMMETRY: Left hand finger pinch is incomplete. Squeeze tips together.');
           } else {
             pushAlert('🟢 PINCH LOCK: Index finger and thumb tips achieved positive contact.');
           }
-        }
-      } else if (trackingState === 1) {
-        if (avgDist > 0.065) {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert(`🔥 Articulation Rep ${repCount + 1} locked-in. Excellent hand range.`);
+
+          const nextReps = lastRepCountRef.current + 1;
+          lastRepCountRef.current = nextReps;
+          setRepCount(nextReps);
+          pushAlert(`🔥 Articulation Rep ${nextReps} locked-in. Excellent hand range.`);
         }
       }
 
-      const pinchPenalty = (formErrors.asymmetry * 25) + (formErrors.poorDepth * 30);
+      const pinchPenalty = (calculatedAsymmetry * 25) + (calculatedPoorDepth * 30);
       currentPrecision = Math.max(10, Math.round(96 - pinchPenalty));
 
     } else if (selectedExercise === 'Facial Mobility') {
@@ -589,31 +904,74 @@ export default function App() {
       const headTiltDeviation = Math.abs((pts[7]?.y || 0.3) - (pts[8]?.y || 0.3));
       currentPosture = Math.max(10, Math.round(100 - headTiltDeviation * 350));
 
+      if (!isSimulated) {
+        calculatedAsymmetry = Math.max(0, Math.min(1.0, (90 - currentSymmetry) / 45));
+        calculatedForwardLean = Math.max(0, Math.min(1.0, (90 - currentPosture) / 45));
+        calculatedPoorDepth = 0;
+        calculatedElbowFlare = 0;
+      } else {
+        calculatedAsymmetry = formErrors.asymmetry;
+        calculatedForwardLean = formErrors.forwardLean;
+        calculatedPoorDepth = formErrors.poorDepth;
+        calculatedElbowFlare = formErrors.elbowFlare;
+      }
+
       // Expression cycles: measuring distance from eye to mouth corners
       let leftMouthEyeDist = 0.5;
       if (leftEye && leftMouth) {
         leftMouthEyeDist = Math.abs(leftEye.y - leftMouth.y);
       }
 
-      if (trackingState === 0) {
-        if (leftMouthEyeDist > 0.046) {
+      if (trackingStateRef.current === 0) {
+        if (leftMouthEyeDist > 0.043) {
+          trackingStateRef.current = 1;
           setTrackingState(1);
-          if (eyeYDiff > 0.006 && formErrors.asymmetry > 0.35) {
+          peakMetricRef.current = leftMouthEyeDist; // track max lift
+        }
+      } else if (trackingStateRef.current === 1) {
+        peakMetricRef.current = Math.max(peakMetricRef.current, leftMouthEyeDist);
+
+        if (leftMouthEyeDist < 0.041) {
+          trackingStateRef.current = 0;
+          setTrackingState(0);
+          
+          if (eyeYDiff > 0.006 && calculatedAsymmetry > 0.35) {
             pushAlert('⚠️ FACIAL ASYMMETRY: Uneven horizontal activation. Coordinate bilateral musculature.');
           } else {
             pushAlert('🟢 BILATERAL SYMMETRY: Good symmetrical face musculature raise!');
           }
-        }
-      } else if (trackingState === 1) {
-        if (leftMouthEyeDist < 0.040) {
-          setRepCount((prev) => prev + 1);
-          setTrackingState(0);
-          pushAlert(`🔥 Expression Cycle ${repCount + 1} finalized. Motor nerves responsive.`);
+
+          const nextReps = lastRepCountRef.current + 1;
+          lastRepCountRef.current = nextReps;
+          setRepCount(nextReps);
+          pushAlert(`🔥 Expression Cycle ${nextReps} finalized. Motor nerves responsive.`);
         }
       }
 
-      const facialPenalty = (formErrors.asymmetry * 35) + (formErrors.forwardLean * 24);
+      const facialPenalty = (calculatedAsymmetry * 35) + (calculatedForwardLean * 24);
       currentPrecision = Math.max(10, Math.round(95 - facialPenalty));
+    }
+
+    // Secure real-time posture correction update to formErrors in parent state
+    if (!isSimulated) {
+      const nextElbowFlare = Math.round(calculatedElbowFlare * 100) / 100;
+      const nextPoorDepth = Math.round(calculatedPoorDepth * 100) / 100;
+      const nextAsymmetry = Math.round(calculatedAsymmetry * 100) / 100;
+      const nextForwardLean = Math.round(calculatedForwardLean * 100) / 100;
+
+      const diff = Math.abs(formErrors.elbowFlare - nextElbowFlare) +
+                   Math.abs(formErrors.poorDepth - nextPoorDepth) +
+                   Math.abs(formErrors.asymmetry - nextAsymmetry) +
+                   Math.abs(formErrors.forwardLean - nextForwardLean);
+
+      if (diff > 0.02) {
+        setFormErrors({
+          elbowFlare: nextElbowFlare,
+          poorDepth: nextPoorDepth,
+          asymmetry: nextAsymmetry,
+          forwardLean: nextForwardLean
+        });
+      }
     }
 
     // Capture running telemetry samples
@@ -624,53 +982,8 @@ export default function App() {
 
   // Real-time audio coaching speak routine
   const speakCoachingInstruction = async (text: string) => {
-    const now = Date.now();
-    // Throttled voice feedback: max one advice every 6 seconds to prevent spamming the user
-    if (now - lastSpokenTimeRef.current < 6000) return;
-    lastSpokenTimeRef.current = now;
-
-    // Filter symbols and keep text crisp
-    const cleanText = text.replace(/^[^\w]*/, '').replace(/[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF]/g, '').slice(0, 80);
-    
-    try {
-      // Attempt backend Gemini Voice Model call
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          text: cleanText,
-          voice: selectedExercise === 'Facial Mobility' || selectedExercise === 'Finger Pinch Drill' ? 'Kore' : 'Zephyr'
-        })
-      });
-      
-      const data = await response.json();
-      if (data.success && data.audio) {
-        // Play the base64 audio block
-        const audioBytes = atob(data.audio);
-        const arrayBuffer = new ArrayBuffer(audioBytes.length);
-        const uintArray = new Uint8Array(arrayBuffer);
-        for (let i = 0; i < audioBytes.length; i++) {
-          uintArray[i] = audioBytes.charCodeAt(i);
-        }
-        const blob = new Blob([arrayBuffer], { type: 'audio/mp3' });
-        const audioUrl = URL.createObjectURL(blob);
-        const audio = new Audio(audioUrl);
-        audio.play().catch(e => {
-          console.warn("Audio autoplay blocked or failed:", e);
-        });
-        return;
-      }
-    } catch (err) {
-      console.warn("Attempt to contact Gemini Voice Server failed, using instant Web Speech Synthesis fallback.", err);
-    }
-
-    // High performance localized browser fallback
-    if ('speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance(cleanText);
-      utterance.rate = 1.05;
-      utterance.pitch = 1.0;
-      window.speechSynthesis.speak(utterance);
-    }
+    // DISABLE_BIOMECHANICS_FEED_AUDIO: User requested to turn off speech cues.
+    return;
   };
 
   const pushAlert = (msg: string) => {
@@ -681,24 +994,35 @@ export default function App() {
     });
 
     // Speak corrections (starts with ⚠️) or critical performance peaks (starts with 🟢)
-    if (msg.includes('⚠️') || msg.includes('🟢')) {
+    const isMutedSound = msg.toUpperCase().includes('SHALLOW SQUAT') || msg.toUpperCase().includes('DEPTH OPTIMAL');
+    if ((msg.includes('⚠️') || msg.includes('🟢')) && !isMutedSound) {
       const commandText = msg.replace('⚠️', '').replace('🟢', '').trim().split(':')[0]; // e.g., "SHALLOW SQUAT" or "DEPTH OPTIMAL"
       speakCoachingInstruction(commandText);
     }
   };
 
+  const pushThrottledAlert = (msg: string, debounceMs: number = 3500) => {
+    const now = Date.now();
+    // Rate limit based on prefix/type key so similar posture issues coalesce beautifully
+    const key = msg.split(':')[0] || msg;
+    const lastTime = lastAlertTimesRef.current[key] || 0;
+    if (now - lastTime < debounceMs) return;
+    lastAlertTimesRef.current[key] = now;
+    pushAlert(msg);
+  };
+
   // Safe accessor averages
   const avgPrecision = accuracySamples.length > 0 
     ? Math.round(accuracySamples.reduce((a, b) => a + b, 0) / accuracySamples.length)
-    : 100;
+    : 0;
   
   const avgSymmetry = symmetrySamples.length > 0
     ? Math.round(symmetrySamples.reduce((a, b) => a + b, 0) / symmetrySamples.length)
-    : 100;
+    : 0;
 
   const avgPosture = postureSamples.length > 0
     ? Math.round(postureSamples.reduce((a, b) => a + b, 0) / postureSamples.length)
-    : 100;
+    : 0;
 
   useEffect(() => {
     return () => {
@@ -809,7 +1133,7 @@ export default function App() {
                   
                   return (
                     <button
-                      key={ex.name}
+                      key={`${activeCategory}-${ex.name}`}
                       onClick={() => setSelectedExercise(ex.name)}
                       className={`text-left p-5 rounded-2xl border transition-all relative flex flex-col justify-between h-52 group cursor-pointer ${
                         isSelected 
@@ -906,18 +1230,18 @@ export default function App() {
               <div className="flex flex-col md:flex-row md:items-center justify-between bg-slate-900 border border-slate-800 rounded-2xl p-4 md:p-5 gap-4">
                 <div className="flex items-center gap-3">
                   <div className="p-2 bg-sky-500 text-slate-950 rounded-xl flex items-center justify-center font-bold">
-                    <Activity className="w-5 h-5" />
+                    <Activity className="w-5 h-5 animate-pulse" />
                   </div>
                   <div>
                     <h3 className="text-base font-black text-white font-sans">{selectedExercise} Drill</h3>
                     <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
-                      Maintain complete flexion targets. Red skeletons highlight active form breaks.
+                      Maintain complete flexion targets. Ideal form references are simulated on the right.
                     </p>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-4 justify-between sm:justify-start">
-                  <div className="flex items-center gap-4 max-sm:w-full">
+                  <div className="flex flex-wrap items-center gap-4 max-sm:w-full">
                     {/* Duration indicators */}
                     <div className="font-mono text-left max-sm:flex-1">
                       <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Active Time</p>
@@ -926,12 +1250,72 @@ export default function App() {
                       </p>
                     </div>
 
-                    {/* Live Rep counts */}
-                    <div className="font-mono text-left pr-4 border-r border-slate-800 max-sm:flex-1">
-                      <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Lock Reps</p>
-                      <p className="text-2xl font-black text-emerald-400 mt-0.5">
-                        {repCount}
-                      </p>
+                    {/* Live Rep counts / Holds */}
+                    <div className="font-mono text-left max-sm:flex-1 pr-4 border-r border-slate-800 flex items-center gap-3">
+                      <div>
+                        <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">
+                          {["Warrior II", "Tree Pose", "Downward Dog", "Cobra Pose"].includes(selectedExercise) ? "Lock Holds" : "Lock Reps"}
+                        </p>
+                        <p className="text-2xl font-black text-emerald-400 mt-0.5">
+                          {repCount}
+                        </p>
+                      </div>
+                      {["Warrior II", "Tree Pose", "Downward Dog", "Cobra Pose"].includes(selectedExercise) && (
+                        <div className="pl-3 border-l border-slate-800">
+                          <p className="text-[9px] font-bold text-violet-400 uppercase tracking-widest flex items-center gap-1">
+                            <Flame className="w-2.5 h-2.5 animate-pulse text-violet-400" /> Active Hold
+                          </p>
+                          <p className="text-sm font-bold text-slate-250 mt-1">
+                            {activeHoldTime.toFixed(1)}s <span className="text-xs text-slate-500">/ 2.0s</span>
+                          </p>
+                          {activeHoldTime > 0 && (
+                            <div className="w-16 h-1 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                              <div 
+                                className="h-full bg-gradient-to-r from-violet-500 to-emerald-400 transition-all duration-75"
+                                style={{ width: `${Math.min(100, (activeHoldTime / 2.0) * 100)}%` }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Voice Link state trigger button */}
+                    <div className="flex items-center pr-2 shrink-0">
+                      {voiceStatus === "disconnected" && (
+                        <button
+                          type="button"
+                          onClick={() => triggerVoiceConnectRef.current?.()}
+                          className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-450 text-slate-950 px-3.5 py-2 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer shadow-md transform hover:-translate-y-0.5 active:scale-95 duration-155 animate-pulse shrink-0"
+                          title="Click to activate low-latency real-time voice corrections"
+                        >
+                          🎙️ Link Coach (Voice)
+                        </button>
+                      )}
+                      {voiceStatus === "connecting" && (
+                        <div className="flex items-center gap-1.5 bg-sky-550/10 text-sky-400 px-3.5 py-2 rounded-lg text-[10px] font-extrabold uppercase border border-sky-500/15 shrink-0">
+                          <RefreshCw className="w-3 h-3 animate-spin text-sky-450" />
+                          <span>CONNECTING...</span>
+                        </div>
+                      )}
+                      {voiceStatus === "error" && (
+                        <button
+                          type="button"
+                          onClick={() => triggerVoiceConnectRef.current?.()}
+                          className="flex items-center gap-1.5 bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer shadow-md shrink-0"
+                        >
+                          ⚠️ Retry Voice
+                        </button>
+                      )}
+                      {voiceStatus === "connected" && (
+                        <div className="flex items-center gap-1.5 bg-emerald-500/10 text-emerald-455 border border-emerald-500/15 px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-wider shrink-0">
+                          <span className="relative flex h-1.5 w-1.5">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                          </span>
+                          <span>COACH ACTIVE</span>
+                        </div>
+                      )}
                     </div>
 
                     <button
@@ -944,26 +1328,45 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Top-Level Real-Time Biomechanics Dashboard Strip */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-900 border border-slate-800 p-4 md:p-5 rounded-2xl shadow-xl">
-                <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col justify-center">
+              {/* 1. Camera & Simulator side-by-side Viewport (Addresses user request 5: "bigger and near the top") */}
+              <div className="w-full">
+                <CameraView
+                  exercise={selectedExercise}
+                  isSimulated={isSimulated}
+                  setIsSimulated={setIsSimulated}
+                  formErrors={formErrors}
+                  landmarks={landmarks}
+                  setLandmarks={setLandmarks}
+                  faceLandmarks={faceLandmarks}
+                  setFaceLandmarks={setFaceLandmarks}
+                  leftHandLandmarks={leftHandLandmarks}
+                  setLeftHandLandmarks={setLeftHandLandmarks}
+                  rightHandLandmarks={rightHandLandmarks}
+                  setRightHandLandmarks={setRightHandLandmarks}
+                  onPoseResults={makePoseAnalytics}
+                />
+              </div>
+
+              {/* 2. Top-Level Real-Time Biomechanics Dashboard Strip (Addresses user request 5: "with a small deck showing...") */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-xl">
+                <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850 flex flex-col justify-center">
                   <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">
-                      Sync Accuracy
+                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
+                      SYNC ACCURACY
                     </span>
-                    <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${avgPrecision >= 85 ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>
-                      {avgPrecision >= 85 ? 'OPTIMAL' : 'DEVIATION'}
+                    <span className={`text-[8.5px] font-extrabold px-1.5 py-0.5 rounded ${avgPrecision >= 85 ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>
+                      {avgPrecision >= 85 ? 'OPTIMAL' : 'CALCULATING'}
                     </span>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-black text-sky-400 font-mono">
-                      {avgPrecision}%
+                    <span className="text-xl font-black text-sky-400 font-mono">
+                      {avgPrecision > 0 ? `${avgPrecision}%` : '--'}
                     </span>
                     <span className="text-[10px] font-bold text-slate-400 font-sans">
                       Target Angle Match
                     </span>
                   </div>
-                  <div className="w-full bg-slate-900 h-1.5 rounded-full mt-2.5 overflow-hidden">
+                  <div className="w-full bg-slate-900 h-1 rounded-full mt-2 overflow-hidden">
                     <div 
                       className="bg-sky-500 h-full rounded-full transition-all duration-300" 
                       style={{ width: `${avgPrecision}%` }} 
@@ -971,24 +1374,24 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col justify-center">
+                <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850 flex flex-col justify-center">
                   <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">
-                      Bilateral Equilibrium
+                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
+                      BILATERAL EQUILIBRIUM
                     </span>
-                    <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${avgSymmetry >= 85 ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>
-                      {avgSymmetry >= 85 ? 'BALANCED' : 'ASYMMETRICAL'}
+                    <span className={`text-[8.5px] font-extrabold px-1.5 py-0.5 rounded ${avgSymmetry >= 85 ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-500'}`}>
+                      {avgSymmetry >= 85 ? 'BALANCED' : 'CALCULATING'}
                     </span>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-black text-rose-500 font-mono">
-                      {avgSymmetry}%
+                    <span className="text-xl font-black text-rose-550 font-mono">
+                      {avgSymmetry > 0 ? `${avgSymmetry}%` : '--'}
                     </span>
                     <span className="text-[10px] font-bold text-slate-400 font-sans">
                       Limb Differential
                     </span>
                   </div>
-                  <div className="w-full bg-slate-900 h-1.5 rounded-full mt-2.5 overflow-hidden">
+                  <div className="w-full bg-slate-900 h-1 rounded-full mt-2 overflow-hidden">
                     <div 
                       className="bg-rose-500 h-full rounded-full transition-all duration-300" 
                       style={{ width: `${avgSymmetry}%` }} 
@@ -996,24 +1399,24 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col justify-center">
+                <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-850 flex flex-col justify-center">
                   <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">
-                      Posture Stiffness
+                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest block font-mono">
+                      POSTURE STIFFNESS
                     </span>
-                    <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${avgPosture >= 80 ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>
-                      {avgPosture >= 80 ? 'STABLE' : 'LEAN WARNING'}
+                    <span className={`text-[8.5px] font-extrabold px-1.5 py-0.5 rounded ${avgPosture >= 80 ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-500'}`}>
+                      {avgPosture >= 80 ? 'STABLE' : 'CALCULATING'}
                     </span>
                   </div>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-black text-purple-400 font-mono">
-                      {avgPosture}%
+                    <span className="text-xl font-black text-purple-400 font-mono">
+                      {avgPosture > 0 ? `${avgPosture}%` : '--'}
                     </span>
                     <span className="text-[10px] font-bold text-slate-400 font-sans">
                       Trunk Core Rigidness
                     </span>
                   </div>
-                  <div className="w-full bg-slate-900 h-1.5 rounded-full mt-2.5 overflow-hidden">
+                  <div className="w-full bg-slate-900 h-1 rounded-full mt-2 overflow-hidden">
                     <div 
                       className="bg-purple-500 h-full rounded-full transition-all duration-300" 
                       style={{ width: `${avgPosture}%` }} 
@@ -1022,10 +1425,10 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Dynamic Interactive Layout Grid (Symmetric Biomechanics-Left & Camera-Right pane) */}
+              {/* 3. Bottom Panels Split Layout Column */}
               <div className="grid lg:grid-cols-12 gap-6 items-stretch">
-                {/* Real-time Biomechanics Dashboard Pane (Takes heavy 7-col focus on Left) */}
-                <div className="lg:col-span-7 flex flex-col">
+                {/* Left Area (Takes broader 8-col focus) */}
+                <div className="lg:col-span-8 flex flex-col">
                   <MetricsPanel
                     exercise={selectedExercise}
                     precisionScore={avgPrecision}
@@ -1045,42 +1448,39 @@ export default function App() {
                   />
                 </div>
 
-                {/* Left-handed Video track / 2D Camera simulator view side-panel (Takes lighter 5-col focus on Right) */}
-                <div className="lg:col-span-5 flex flex-col justify-between">
-                  <CameraView
-                    exercise={selectedExercise}
-                    isSimulated={isSimulated}
-                    setIsSimulated={setIsSimulated}
-                    formErrors={formErrors}
-                    landmarks={landmarks}
-                    setLandmarks={setLandmarks}
-                    faceLandmarks={faceLandmarks}
-                    setFaceLandmarks={setFaceLandmarks}
-                    leftHandLandmarks={leftHandLandmarks}
-                    setLeftHandLandmarks={setLeftHandLandmarks}
-                    rightHandLandmarks={rightHandLandmarks}
-                    setRightHandLandmarks={setRightHandLandmarks}
-                    onPoseResults={makePoseAnalytics}
-                  />
-
+                {/* Right Area (Takes 4-col focus) */}
+                <div className="lg:col-span-4 flex flex-col justify-between gap-6">
                   {/* Real-time Gemini Live Speech Guidance Session */}
-                  <LiveCoachPanel exercise={selectedExercise} formErrors={formErrors} />
+                  <div className="h-full">
+                    <LiveCoachPanel
+                      exercise={selectedExercise}
+                      formErrors={formErrors}
+                      repCount={repCount}
+                      onStatusChange={setVoiceStatus}
+                      triggerConnectRef={triggerVoiceConnectRef}
+                      trackingLost={!isSimulated && (!landmarks || landmarks.length === 0)}
+                    />
 
-                  {/* Active posture tips card under camera side pane */}
-                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4.5 mt-5">
-                    <h4 className="text-xs font-black uppercase text-slate-300 tracking-wider mb-2 flex items-center gap-1.5">
-                      <HelpCircle className="w-3.5 h-3.5 text-sky-400" />
-                      Dynamic Postural Cue
-                    </h4>
-                    <p className="text-slate-400 text-xs leading-relaxed">
-                      {EXERCISE_CATALOG.find(ex => ex.name === selectedExercise)?.postureTip}
-                    </p>
-                    <div className="mt-3 flex gap-2 overflow-x-auto select-none border-t border-slate-800/40 pt-3">
-                      {EXERCISE_CATALOG.find(ex => ex.name === selectedExercise)?.muscles.map((mus) => (
-                        <span key={mus} className="text-[9px] font-bold bg-slate-950 border border-slate-850 px-2 py-1 rounded text-slate-400 whitespace-nowrap">
-                          {mus}
-                        </span>
-                      ))}
+                    {/* Active posture tips card */}
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4.5 mt-5">
+                      <h4 className="text-xs font-black uppercase text-slate-300 tracking-wider mb-2 flex items-center gap-1.5">
+                        <HelpCircle className="w-3.5 h-3.5 text-sky-400" />
+                        Dynamic Postural Cue
+                      </h4>
+                      <p className="text-slate-400 text-xs leading-relaxed">
+                        {EXERCISE_CATALOG.find(ex => ex.name === selectedExercise)?.postureTip || HANDS_FACE_CATALOG.find(ex => ex.name === selectedExercise)?.postureTip}
+                      </p>
+                      <div className="mt-3 flex gap-2 overflow-x-auto select-none border-t border-slate-800/40 pt-3">
+                        {EXERCISE_CATALOG.find(ex => ex.name === selectedExercise)?.muscles.map((mus) => (
+                          <span key={`${selectedExercise}-${mus}`} className="text-[9px] font-bold bg-slate-950 border border-slate-850 px-2 py-1 rounded text-slate-400 whitespace-nowrap">
+                            {mus}
+                          </span>
+                        )) || HANDS_FACE_CATALOG.find(ex => ex.name === selectedExercise)?.muscles.map((mus) => (
+                          <span key={`${selectedExercise}-${mus}`} className="text-[9px] font-bold bg-slate-950 border border-slate-850 px-2 py-1 rounded text-slate-400 whitespace-nowrap">
+                            {mus}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 </div>

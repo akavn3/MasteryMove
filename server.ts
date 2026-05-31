@@ -89,8 +89,16 @@ app.post("/api/tts", async (req, res) => {
       res.json({ success: false, error: "Modality response was successful but did not yield inline audio data." });
     }
   } catch (error: any) {
+    const errorString = String(error?.message || error);
+    const isQuotaError = errorString.includes("quota") || errorString.includes("RESOURCE_EXHAUSTED") || errorString.includes("429");
+    
+    if (isQuotaError) {
+      console.warn("⚠️ Gemini TTS Quota exceeded (Free-tier limit reached). Notifying client to activate client-side Speech Synthesis fallback.");
+      return res.status(200).json({ success: false, fallback: true, error: "Gemini TTS quota limits reached" });
+    }
+    
     console.error("Gemini TTS Voice generation error:", error);
-    res.status(500).json({ success: false, error: error.message || "Interference on TTS voice layer" });
+    res.status(500).json({ success: false, error: errorString || "Interference on TTS voice layer" });
   }
 });
 
@@ -134,12 +142,17 @@ ${feedbackHistory.length > 0 ? feedbackHistory.map((v: string) => `- "${v}"`).jo
 Recorded Biomechanical Angle Extremes:
 ${JSON.stringify(angleStats, null, 2)}
 
-Produce a clean, professional athletic assessment structured exactly as follows:
+Produce a clean, professional athletic assessment. You must not only praise achievements but also explicitly assess mistakes and write detailed corrections. Map your analysis clearly matching these states:
+- **RED (Incorrect)**: Explicitly list incorrect angles or motions, stating which specific body parts are incorrect and what exact correctional drill is required.
+- **YELLOW/ORANGE (Decent)**: Highlight decent, stable performance, offering optimization pointers.
+- **GREEN (Perfect)**: Compliment perfect postures and encourage maintaining the target kinematics.
+
+Structure your report as follows:
 ### 1. 🏆 Athlete Appraisal
 Discuss the overall score, pacing/tempo, structure of the workout, and how they stack up.
 
 ### 2. 🔬 Biomechanical & Joint Analysis
-Analyze the symmetry, hip/knee/shoulder flexion statistics, and trunk posture stability. Discuss why certain triggers occurred (e.g., if "flared elbows" occurred, explain how this reduces shoulder stability and wastes kinetic energy).
+Analyze the symmetry, hip/knee/shoulder flexion statistics, and trunk posture stability. Discuss why certain triggers occurred (e.g., if "flared elbows" occurred, explain how this reduces shoulder stability and wastes kinetic energy) classified under RED, YELLOW, or GREEN.
 
 ### 3. 🎯 High-Performance Mastery Plan
 Provide 2-3 specific, actionable athletic cues and corrective exercises (such as active shoulder backing, hip-hinge focus, or specific mobility stretches) to implement in their very next workout to hit 100% precision. Do not give general advice; render precise biomechanical actions.
@@ -190,13 +203,18 @@ wss.on("connection", async (clientWs, req) => {
         speechConfig: {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
         },
-        systemInstruction: `You are "Coach Apex", an elite biomechanics scientist and high-performance athletic coach speaking in a supportive, high-tempo, technically precise 1-on-1 voice training context.
+        systemInstruction: `You are "Coach Apex", an elite biomechanics scientist and high-performance athletic coach conducting a focused, technically critical 1-on-1 training session.
 The athlete is currently performing: "${exercise}".
 
 Strict coaching guidelines:
-1. If you receive a text message starting with "[POSTURE ALERT:", immediately address it with a punchy verbal correction (keep it under 15 words). Tell them exactly how to fix their posture/joints right now.
-2. Frequently praise and appreciate the athlete when they maintain great form or respond to your cues (e.g., "Beautiful squat depth!", "Incredible elbow lock!", "Sleek torso alignment—keep that up!").
-3. Keep all audio turns highly conversational, encouraging, extremely short, and biomechanically accurate because they are actively working out.`,
+1. Critical and Disciplined Persona: Do not sugarcoat or give generic praise when there are deviations or if visual tracking is lost. If the athlete does the wrong exercise, or has poor form, call them out firmly and give strict corrective instructions.
+2. Prevent Repetition: NEVER repeat the exact same correction phrase twice in a row. If a deviation persists, vary your words, explain the physical/biomechanical reason for the fix, or use new metaphors (e.g., 'imagine a board behind your spine', 'keep triceps glued to your ribs').
+3. Be Numerical and Specific: If you receive a "[POSTURE ALERT:" message containing specific percentages, distances, or angles, incorporate those exact numbers directly into your verbal comments! Do not speak in vague generalizations.
+4. Structured Feedback Model:
+   - RED (Incorrect Form / Mismatch / Lost Tracking): Explicitly identify incorrect body parts, state the exact numerical deviation if provided, explain the risk (e.g. knee strain, momentum swinging), and demand corrective realignment.
+   - ORANGE/YELLOW (Steady/Warning): Acknowledge their balance, but recommend a physical adjustment to keep optimal muscle isolation.
+   - GREEN (Perfect Form): Proactively give a brief, high-energy praise under 6 words only when specifically triggered with no form errors.
+5. If you receive a text starting with "[POSTURE ALERT:", immediately speak with a punchy verbal cue (keep it under 18 words) targeting that exact joint.`,
         outputAudioTranscription: {},
         inputAudioTranscription: {},
       },

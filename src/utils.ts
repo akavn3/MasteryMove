@@ -110,7 +110,7 @@ export function getSimulatedLandmarks(
 
   if (exercise === 'Squats') {
     // Squat: hips drift down, knees expand outwards, shoulders lean slightly forward
-    const hipY = hipYBase + currentDepthFactor * 0.18;
+    const hipY = hipYBase + currentDepthFactor * 0.22;
     const hipXLeft = 0.5 - hipXWidth / 2 - (formErrors.asymmetry * 0.025);
     const hipXRight = 0.5 + hipXWidth / 2 + (formErrors.asymmetry * 0.015);
 
@@ -123,9 +123,9 @@ export function getSimulatedLandmarks(
 
     // Knees: flex forwards and down. 25 (left), 26 (right)
     // At standing (currentDepthFactor = 0), knees are at y = 0.68
-    // At bottom of squat (currentDepthFactor = 1), knees are at y = 0.76 and wider X
-    const kneeY = 0.68 + currentDepthFactor * 0.08;
-    const kneeXSpread = currentDepthFactor * 0.04;
+    // At bottom of squat (currentDepthFactor = 1), knees are at y = 0.79 and wider X to support realistic deep flexion
+    const kneeY = 0.68 + currentDepthFactor * 0.11;
+    const kneeXSpread = currentDepthFactor * 0.06;
     landmarks[25] = { x: 0.42 - kneeXSpread + (formErrors.asymmetry * 0.03), y: kneeY, z: -0.1, visibility: 0.98 };
     landmarks[26] = { x: 0.58 + kneeXSpread, y: kneeY, z: 0.1, visibility: 0.98 };
 
@@ -269,9 +269,9 @@ export function getSimulatedLandmarks(
     // Right leg (bent front leg)
     const rightAnkleX = 0.72;
     landmarks[28] = { x: rightAnkleX, y: 0.85, z: 0.05, visibility: 0.98 }; // Right ankle
-    // Bent knee shifts forward and down
-    const rightKneeX = 0.64 + lFactor * 0.06;
-    const rightKneeY = 0.70 + lFactor * 0.06;
+    // Bent knee shifts forward and down to achieve a deep lunge angle (<115)
+    const rightKneeX = 0.64 + lFactor * 0.11;
+    const rightKneeY = 0.70 + lFactor * 0.12;
     landmarks[26] = { x: rightKneeX, y: rightKneeY, z: 0.05, visibility: 0.98 }; // Right knee
 
     // Shoulders
@@ -483,4 +483,86 @@ export function getSimulatedLandmarks(
   }
 
   return landmarks;
+}
+
+// Global Biomechanical Sentry to detect if a completely wrong exercise is in progress
+export function detectMovementMismatch(
+  pts: Landmark[],
+  selectedExercise: ExerciseType
+): { mismatchDetected: boolean; perceivedExercise: string; warningText: string } {
+  if (!pts || pts.length < 29) {
+    return { mismatchDetected: false, perceivedExercise: '', warningText: '' };
+  }
+
+  const leftHip = pts[23], leftKnee = pts[25], leftAnkle = pts[27];
+  const rightHip = pts[24], rightKnee = pts[26], rightAnkle = pts[28];
+  const shoulderLeft = pts[11], shoulderRight = pts[12];
+  const elbowLeft = pts[13], elbowRight = pts[14];
+  const wristLeft = pts[15], wristRight = pts[16];
+
+  if (!leftHip || !leftKnee || !leftAnkle || !shoulderLeft) {
+    return { mismatchDetected: false, perceivedExercise: '', warningText: '' };
+  }
+
+  const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+  const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+  const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
+
+  const leftElbowAngle = calculateAngle(shoulderLeft, elbowLeft, wristLeft);
+  const rightElbowAngle = calculateAngle(shoulderRight, elbowRight, wristRight);
+  const avgElbowAngle = (leftElbowAngle + rightElbowAngle) / 2;
+
+  // Determine if user is in horizontal stance (Pushup/Plank position)
+  // Normally the shoulder y and ankle y differ significantly (standing: shoulder y ≈ 0.35, ankle y ≈ 0.85, diff ≈ 0.50)
+  // In pushups, the body stretches horizontally, and shoulder y is closer to ankle y (e.g. diff < 0.28, and shoulder is low to ground)
+  const yDiff = Math.abs(shoulderLeft.y - leftAnkle.y);
+  const xDiff = Math.abs(shoulderLeft.x - leftAnkle.x);
+  
+  // A high hip altitude (y coordinate less than 0.7) merged with thin horizontal slope represents pushup alignment
+  const isHorizontalProne = yDiff < 0.28 && xDiff > 0.32 && leftHip.y > 0.40;
+
+  // 1. If currently selected exercise is NOT Pushups, but they are flat in a Prone shape
+  if (isHorizontalProne && selectedExercise !== 'Pushups' && selectedExercise !== 'Cobra Pose' && selectedExercise !== 'Downward Dog') {
+    return {
+      mismatchDetected: true,
+      perceivedExercise: 'Pushups / Planks',
+      warningText: `⚠️ WRONG EXERCISE: Prone Pushup/Plank stance detected. This is incorrect for ${selectedExercise}. Please stand up.`
+    };
+  }
+
+  // 2. If currently selected exercise is NOT Squats, but they are doing deep knee bends
+  if (avgKneeAngle < 132 && selectedExercise !== 'Squats' && selectedExercise !== 'Warrior II' && selectedExercise !== 'Tree Pose' && selectedExercise !== 'Downward Dog' && selectedExercise !== 'Cobra Pose') {
+    return {
+      mismatchDetected: true,
+      perceivedExercise: 'Squats',
+      warningText: `⚠️ WRONG EXERCISE: Deep knee squats detected, which is incorrect for focused "${selectedExercise}".`
+    };
+  }
+
+  // 3. If selected exercise is local (Finger Pinch Drill or Facial Mobility) but there's massive whole-body exercise movement
+  if (selectedExercise === 'Finger Pinch Drill' || selectedExercise === 'Facial Mobility') {
+    if (avgKneeAngle < 140) {
+      return {
+        mismatchDetected: true,
+        perceivedExercise: 'Squats',
+        warningText: `⚠️ EXTREME FORM MISMATCH: Performing Squats during focused ${selectedExercise}! Stop, rest, and keep core focused.`
+      };
+    }
+    if (isHorizontalProne) {
+      return {
+        mismatchDetected: true,
+        perceivedExercise: 'Pushups / Planks',
+        warningText: `⚠️ EXTREME FORM MISMATCH: Performing Pushups/Planks during focused ${selectedExercise}! Return to sitting or standing posture.`
+      };
+    }
+    if (avgElbowAngle < 105 && selectedExercise === 'Facial Mobility') {
+      return {
+        mismatchDetected: true,
+        perceivedExercise: 'Bicep Curls / Shoulder Presses',
+        warningText: `⚠️ EXTREME FORM MISMATCH: Arm movement detected during Facial Mobility. Keep upper body stationary.`
+      };
+    }
+  }
+
+  return { mismatchDetected: false, perceivedExercise: '', warningText: '' };
 }
