@@ -42,6 +42,21 @@ MasteryMove is built as a highly optimized full-stack application. For a complet
 
 ---
 
+## 💻 System Requirements
+
+### Client Device (Browser)
+- **Processor**: Modern multi-core CPU (Client-side MediaPipe ML models are computationally intensive).
+- **Memory**: 4GB RAM minimum (8GB recommended).
+- **Hardware**: Functioning webcam (for pose tracking) and microphone (optional, for Live Coach voice features).
+- **Browser**: Modern web browser with WebGL 2.0 and WebRTC support (e.g., latest Chrome, Edge, Firefox, or Safari).
+
+### Backend Server (Node.js)
+- **Node Environment**: Node.js v18 or higher.
+- **Compute**: Lightweight (1 CPU core, 512MB RAM minimal), as the server primarily acts as a WebSocket proxy and API router to Gemini. Real-time vision processing is handled by the client.
+- **Network**: Outbound internet access to reach Google's Gemini API endpoints.
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
