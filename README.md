@@ -82,3 +82,5 @@ Compile a CJS web-server and bundled frontend package cleanly inside `dist/`:
 ## 🔒 Privacy & Safety
 
 User webcam footage is processed entirely locally inside your browser sandbox. No video, images, or raw sensor frames are sent to external servers or APIs. Only end-of-session numeric statistics (count, average accuracy, score profiles) are routed to our secure backend endpoints to synthesize your personalized Coach Apex training summary.
+
+**Voice Coaching Privacy**: When you use the Live Coach voice chat feature, your microphone audio is securely streamed to Gemini (Google's) servers to generate real-time conversational feedback. This audio stream is turned off by default and only activates when you explicitly click to turn on the voice coaching feature.
