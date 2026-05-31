@@ -7,11 +7,11 @@ MasteryMove is a high-performance, real-time biomechanics training platform powe
 ## ✨ Key Capabilities
 
 - 🤖 **On-Device Pose Estimation**: Runs high-speed, client-side skeletal tracking (<50ms latency) using standard webcams via **MediaPipe's PoseLandmarker API**. All spatial processing is kept local to ensure complete user privacy.
-- 🟥🟨🟩 **3-Tier Real-Time Biomechanics Alert System**: Form metrics are graded instantaneously:
-  - **RED (Action Required)**: Critical errors such as elbow flare, slouching/sagging, or poor squat depth.
-  - **YELLOW/ORANGE (Decent)**: Solid control, but offers optimization targets to lock in stability.
-  - **GREEN (Optimal)**: Confirms perfect skeletal alignment and trajectory control.
-- 🎙️ **Reactive TTS Coach**: Delivers punchy, conversational, and encouraging physical coaching cues during movement transitions.
+- 🎯 **Real-Time Flawless Simulator**: Includes a perfectly aligned virtual simulator with continuous motion to demonstrate optimal drill form, completely free of wobbling or unrequested biomechanical defects.
+- 🟥🟨🟩 **Genuine Biomechanical Feedback & Precision**: Form metrics are graded genuinely and transparently, instantly reacting to skeletal alignment issues. The precision penalty model explicitly triggers off real-world anomalies (like short depth, elbow flare, and asymmetric shifts):
+  - **RED/YELLOW Alerts**: Actionable, direct coaching commands dynamically throttling to correct your form exactly at the point of failure.
+  - **GREEN (Flawless)**: Confirms perfect skeletal alignment and trajectory control.
+- 🎙️ **Reactive TTS Coach & Multimodal API**: Delivers punchy, conversational physical coaching cues directly over WebSocket utilizing the Gemini Multimodal Live API.
 - 🏆 **Comprehensive Post-Session Appraisals**: Provides deep statistical summaries, range-of-motion metrics, joint asymmetry measurements, and actionable coaching feedback.
 
 ---
@@ -33,7 +33,7 @@ MasteryMove is a high-performance, real-time biomechanics training platform powe
 
 ## 🛠️ Architecture
 
-MasteryMove is built as a highly optimized full-stack application:
+MasteryMove is built as a highly optimized full-stack application. For a complete system topology and execution flow, please review the [ARCHITECTURE.md](ARCHITECTURE.md) document.
 
 - **Frontend**: React, Vite, Tailwind CSS, Lucide icons, and Recharts visualization components.
 - **Computer Vision**: `@mediapipe/pose` is configured with client-side WebGL canvas redraw loops to optimize frames and minimize CPU overhead.

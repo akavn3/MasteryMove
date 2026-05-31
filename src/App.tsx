@@ -371,7 +371,7 @@ export default function App() {
 
       // Compute instant precision penalty
       const squatErrorPenalty = (calculatedPoorDepth * 28) + (calculatedAsymmetry * 24) + (calculatedForwardLean * 20);
-      currentPrecision = Math.max(10, Math.round(92 - squatErrorPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - squatErrorPenalty));
 
     // BICEP CURL RULESETS
     } else if (selectedExercise === 'Bicep Curls') {
@@ -435,7 +435,7 @@ export default function App() {
       }
 
       const curlErrorPenalty = (calculatedElbowFlare * 35) + (calculatedAsymmetry * 30);
-      currentPrecision = Math.max(10, Math.round(96 - curlErrorPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - curlErrorPenalty));
 
     // OVERHEAD PRESS RULESETS
     } else if (selectedExercise === 'Overhead Press') {
@@ -494,7 +494,7 @@ export default function App() {
       }
 
       const pressPenalty = (calculatedElbowFlare * 25) + (calculatedAsymmetry * 38);
-      currentPrecision = Math.max(10, Math.round(94 - pressPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - pressPenalty));
 
     // PUSHUP RULESETS
     } else if (selectedExercise === 'Pushups') {
@@ -549,7 +549,7 @@ export default function App() {
       }
 
       const pushupPenalty = (calculatedForwardLean * 32) + (calculatedElbowFlare * 28);
-      currentPrecision = Math.max(10, Math.round(91 - pushupPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - pushupPenalty));
 
     // WARRIOR II RULESETS
     } else if (selectedExercise === 'Warrior II') {
@@ -617,7 +617,7 @@ export default function App() {
       }
 
       const warriorPenalty = (calculatedPoorDepth * 25) + (calculatedElbowFlare * 30);
-      currentPrecision = Math.max(10, Math.round(95 - warriorPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - warriorPenalty));
 
     // TREE POSE RULESETS
     } else if (selectedExercise === 'Tree Pose') {
@@ -676,7 +676,7 @@ export default function App() {
       }
 
       const treePenalty = (calculatedAsymmetry * 35) + (calculatedPoorDepth * 20);
-      currentPrecision = Math.max(10, Math.round(94 - treePenalty));
+      currentPrecision = Math.max(10, Math.round(100 - treePenalty));
 
     // DOWNWARD DOG RULESETS
     } else if (selectedExercise === 'Downward Dog') {
@@ -737,7 +737,7 @@ export default function App() {
       }
 
       const dogPenalty = (calculatedPoorDepth * 30) + (calculatedForwardLean * 24);
-      currentPrecision = Math.max(10, Math.round(92 - dogPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - dogPenalty));
 
     // COBRA POSE RULESETS
     } else if (selectedExercise === 'Cobra Pose') {
@@ -798,7 +798,7 @@ export default function App() {
       }
 
       const cobraPenalty = (calculatedForwardLean * 38) + (calculatedElbowFlare * 22);
-      currentPrecision = Math.max(10, Math.round(93 - cobraPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - cobraPenalty));
 
     } else if (selectedExercise === 'Finger Pinch Drill') {
       let leftDist = 1.0;
@@ -880,7 +880,7 @@ export default function App() {
       }
 
       const pinchPenalty = (calculatedAsymmetry * 25) + (calculatedPoorDepth * 30);
-      currentPrecision = Math.max(10, Math.round(96 - pinchPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - pinchPenalty));
 
     } else if (selectedExercise === 'Facial Mobility') {
       const nose = pts[0];
@@ -949,7 +949,39 @@ export default function App() {
       }
 
       const facialPenalty = (calculatedAsymmetry * 35) + (calculatedForwardLean * 24);
-      currentPrecision = Math.max(10, Math.round(95 - facialPenalty));
+      currentPrecision = Math.max(10, Math.round(100 - facialPenalty));
+    }
+
+    // Real-time Defect Warning Triggers
+    const toleranceOffset = tolerance === 'Elite' ? 0.15 : (tolerance === 'Advanced' ? 0.25 : 0.35);
+    
+    // Only process real-time continuous feedback for LIVE mode (simulator is already flawless)
+    if (!isSimulated) {
+      if (calculatedPoorDepth > toleranceOffset) {
+        if (['Squats', 'Pushups'].includes(selectedExercise)) {
+          if (trackingStateRef.current === 1) { 
+            pushThrottledAlert(`⚠️ SHALLOW DEPTH: Joint flexion missing target by ${Math.round(calculatedPoorDepth * 100)}%. Sink lower.`, 3000);
+          }
+        } else {
+          pushThrottledAlert(`⚠️ INCOMPLETE MOTION: Missing full extension or depth by ${Math.round(calculatedPoorDepth * 100)}%.`, 3000);
+        }
+      }
+      
+      if (calculatedForwardLean > toleranceOffset) {
+        pushThrottledAlert(`⚠️ CORE/SPINE SAGGING: Postural lean deviation of ${Math.round(calculatedForwardLean * 100)}%. Brace core and straighten spine.`, 3000);
+      }
+      
+      if (calculatedAsymmetry > toleranceOffset) {
+        pushThrottledAlert(`⚠️ ASYMMETRICAL LOAD: Left-right balance skewed by ${Math.round(calculatedAsymmetry * 100)}%. Center weight over both limbs.`, 3000);
+      }
+      
+      if (calculatedElbowFlare > toleranceOffset) {
+        pushThrottledAlert(`⚠️ ELBOW FLARE: Joints are drifting sideways by ${Math.round(calculatedElbowFlare * 100)}%. Tuck elbows closer to your ribs.`, 3000);
+      }
+
+      if (calculatedAsymmetry < 0.1 && calculatedForwardLean < 0.1 && calculatedPoorDepth < 0.1 && calculatedElbowFlare < 0.1) {
+        pushThrottledAlert(`🟢 FLAWLESS POSTURE: Biomechanics tracking 100% alignment standard. Hold this form!`, 6000);
+      }
     }
 
     // Secure real-time posture correction update to formErrors in parent state
