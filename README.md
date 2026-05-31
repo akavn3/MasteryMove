@@ -2,21 +2,39 @@
 
 MasteryMove is a high-performance, real-time biomechanics training platform powered by **Coach Apex**—an elite digital biomechanics scientist. Integrating advanced, client-side computer vision with server-side multi-modal analysis, MasteryMove analyzes individual movement patterns to deliver instant corrective feedback and structured athletic appraisals.
 
+<div align="center">
+  <img src="./assets/screenshot-dashboard.png" alt="MasteryMove Dashboard Live Tracking" width="800" />
+</div>
+
 ---
 
 ## ✨ Key Capabilities
 
 - 🤖 **On-Device Pose Estimation**: Runs high-speed, client-side skeletal tracking (<50ms latency) using standard webcams via **MediaPipe's PoseLandmarker API**. All spatial processing is kept local to ensure complete user privacy.
 - 🎯 **Real-Time Flawless Simulator**: Includes a perfectly aligned virtual simulator with continuous motion to demonstrate optimal drill form, completely free of wobbling or unrequested biomechanical defects.
+
+<div align="center">
+  <img src="./assets/screenshot-calibration.png" alt="Calibration and Real-Time Feed" width="800" />
+</div>
+
 - 🟥🟨🟩 **Genuine Biomechanical Feedback & Precision**: Form metrics are graded genuinely and transparently, instantly reacting to skeletal alignment issues. The precision penalty model explicitly triggers off real-world anomalies (like short depth, elbow flare, and asymmetric shifts):
   - **RED/YELLOW Alerts**: Actionable, direct coaching commands dynamically throttling to correct your form exactly at the point of failure.
   - **GREEN (Flawless)**: Confirms perfect skeletal alignment and trajectory control.
 - 🎙️ **Reactive TTS Coach & Multimodal API**: Delivers punchy, conversational physical coaching cues directly over WebSocket utilizing the Gemini Multimodal Live API.
+
+<div align="center">
+  <img src="./assets/screenshot-voice-coach.png" alt="Voice Coach Apex Panel" width="400" />
+</div>
+
 - 🏆 **Comprehensive Post-Session Appraisals**: Provides deep statistical summaries, range-of-motion metrics, joint asymmetry measurements, and actionable coaching feedback.
 
 ---
 
 ## 🏃 Supported Exercises & Drills
+
+<div align="center">
+  <img src="./assets/screenshot-exercises.png" alt="Supported Drills Selection" width="800" />
+</div>
 
 1. **Squats**: Tracks depth (ideal knee flexion peak), forward trunk lean, and horizontal stance asymmetry.
 2. **Bicep Curls**: Monitors elbow flare drift and optimal peak concentric contraction.
