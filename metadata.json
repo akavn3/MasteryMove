@@ -1,0 +1,6 @@
+{
+  "name": "MasteryMove",
+  "description": "AI-Powered Precision Movement Training utilizing real-time pose estimation and postural optimization feedback.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
